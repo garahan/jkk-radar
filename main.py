@@ -7,6 +7,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
 from discord_webhook import DiscordWebhook, DiscordEmbed
 
 # --- CONFIGURATION ---
@@ -34,7 +35,7 @@ def send_discord_alert(title, price, size, link):
     webhook.execute()
 
 def main():
-    print("Starting JKK Button Hunter...")
+    print("Starting JKK Smart Filler...")
     driver = setup_driver()
     
     if os.path.exists(SEEN_FILE):
@@ -48,38 +49,40 @@ def main():
         driver.get(JKK_URL)
         wait = WebDriverWait(driver, 10)
         print(f"Landed on: {driver.title}")
+        time.sleep(2)
 
-        # --- THE FIX: AGGRESSIVE BUTTON HUNTING ---
-        # We are likely already on the search page. We need to find the 'Search' button.
-        # It's usually an image with alt='検索' or an input type='image'
-        
-        button_clicked = False
-        search_selectors = [
-            (By.XPATH, "//img[@alt='検索']"),              # Standard Image Button
-            (By.XPATH, "//input[@type='image' and @alt='検索']"), # Input Image
-            (By.XPATH, "//a[contains(text(),'検索')]"),     # Text Link
-            (By.XPATH, "//input[@value='検索']"),           # Standard Input
-            (By.CLASS_NAME, "btnSearch")                   # Common Class name
-        ]
+        # --- STEP 1: CHECK THE "WARDS" (区部) BOX ---
+        # If we don't check this, we get 0 results.
+        try:
+            print("Looking for 'Ward Area' (区部) checkbox...")
+            # Try to find the label or input containing '区部'
+            ward_checkbox = driver.find_element(By.XPATH, "//label[contains(text(),'区部')] | //input[@type='checkbox' and contains(@title,'区部')]")
+            
+            # Scroll to it and click
+            ActionChains(driver).move_to_element(ward_checkbox).click().perform()
+            print("✅ Checked 'Ward Area' box.")
+        except Exception as e:
+            print(f"⚠️ Could not check Ward box (Might already be checked or different layout): {e}")
 
+        # --- STEP 2: CLICK SEARCH (検索する) ---
         print("Hunting for Search button...")
-        for by_method, selector in search_selectors:
+        try:
+            # Updated selectors based on your text "[検索する]"
+            search_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(),'検索する')] | //img[@alt='検索する'] | //input[@value='検索する'] | //img[@alt='検索']")))
+            search_btn.click()
+            print("✅ CLICKED Search Button.")
+        except:
+             # Backup: JavaScript Click if standard click fails
             try:
-                btn = driver.find_element(by_method, selector)
-                btn.click()
-                print(f"✅ CLICKED button using: {selector}")
-                button_clicked = True
-                break # Stop looking if we clicked one
+                btn = driver.find_element(By.XPATH, "//a[contains(text(),'検索')]")
+                driver.execute_script("arguments[0].click();", btn)
+                print("✅ Force-Clicked button via JS.")
             except:
-                continue # Try the next one
-
-        if not button_clicked:
-            print("❌ Could not find ANY search button. Dumping page text for debugging:")
-            print(driver.find_element(By.TAG_NAME, "body").text[:1000])
+                print("❌ Could not find Search button.")
 
         time.sleep(5) # Wait for results
 
-        # --- SCRAPE ---
+        # --- STEP 3: SCRAPE ---
         rows = driver.find_elements(By.XPATH, "//tr[.//a[contains(text(),'詳細') or contains(@alt,'詳細')]]")
         print(f"Found {len(rows)} listings on the table.")
         
@@ -100,12 +103,12 @@ def main():
                 if link not in seen_apartments:
                     if price_int <= MAX_RENT:
                         print(f"MATCH! {text[:20]}... ({price_int})")
-                        send_discord_alert("Apartment", f"{price_int} Yen", "Check Link", link)
+                        title = text.split(" ")[0]
+                        send_discord_alert(title, f"{price_int} Yen", "Check Link", link)
                         new_finds += 1
-            except Exception as e:
-                pass # Skip bad rows
+            except:
+                pass 
 
-        # Save
         if new_finds > 0:
             seen_apartments.extend(current_scan_ids)
             seen_apartments = list(set(seen_apartments))
