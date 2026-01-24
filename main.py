@@ -34,7 +34,7 @@ def send_discord_alert(title, price, size, link):
     webhook.execute()
 
 def main():
-    print("Starting JKK Patient Bot...")
+    print("Starting JKK Force Entry Bot...")
     driver = setup_driver()
     
     if os.path.exists(SEEN_FILE):
@@ -47,43 +47,63 @@ def main():
     try:
         driver.get(JKK_URL)
         print(f"Landed on: {driver.title}")
-        
-        # --- THE FIX: WAIT FOR THE FORM ---
-        wait = WebDriverWait(driver, 25) # Wait up to 25 seconds for redirect
-        
-        print("Waiting for redirect to finish...")
+        wait = WebDriverWait(driver, 10)
+
+        # --- PHASE 1: FORCE THE REDIRECT ---
+        print("Checking for redirect trap...")
         try:
-            # Wait until the word "地域" (Region) appears. This means the Form has loaded.
-            wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '地域')]")))
-            print("✅ Redirect finished! Form loaded.")
+            # 1. Try to find the form immediately
+            wait.until(EC.presence_of_element_located((By.XPATH, "//label[contains(.,'区部')]")))
+            print("✅ Form loaded immediately.")
         except:
-            print("⚠️ Timeout waiting for form. Dumping text:")
-            print(driver.find_element(By.TAG_NAME, "body").text[:500])
+            print("⚠️ Form not found yet. Looking for 'Click Here' link...")
+            try:
+                # 2. If not found, click the "If not displayed, click here" link
+                # "こちら" = Here
+                redirect_link = driver.find_element(By.PARTIAL_LINK_TEXT, "こちら")
+                redirect_link.click()
+                print("✅ Clicked manual redirect link!")
+                time.sleep(3) # Wait for load
+            except:
+                print("❌ Could not find redirect link. Dumping Page Title:")
+                print(driver.title)
 
-        # --- STEP 1: CLICK "WARD AREA" (区部) ---
+        # --- PHASE 2: SELECT "WARD AREA" (ROBUST) ---
+        print("Targeting Ward Area...")
         try:
-            # JavaScript Click is most reliable for these checkboxes
-            print("Clicking 'Ward Area'...")
-            # Find the input that has '区部' in its parent or title, or just the first checkbox in the table
-            checkbox = driver.find_element(By.XPATH, "//input[@type='checkbox'][1]") 
-            driver.execute_script("arguments[0].click();", checkbox)
-            print("✅ Clicked first checkbox (Usually Ward Area).")
-        except Exception as e:
-            print(f"⚠️ Checkbox warning: {e}")
+            # Use specific label targeting, not just [1]
+            # Finds label containing "区部" then finds the input associated with it
+            ward_checkbox = driver.find_element(By.XPATH, "//label[contains(.,'区部')]/preceding-sibling::input | //label[contains(.,'区部')]/../input | //input[contains(@title,'区部')]")
+            driver.execute_script("arguments[0].checked = true;", ward_checkbox) # Force check
+            print("✅ Checked 'Ward Area' box (Force JS).")
+        except:
+            # Fallback to the first checkbox if specific fail
+            try:
+                cb = driver.find_element(By.XPATH, "//input[@type='checkbox']")
+                driver.execute_script("arguments[0].click();", cb)
+                print("⚠️ Checked first checkbox as fallback.")
+            except Exception as e:
+                print(f"❌ Checkbox failed: {e}")
 
-        # --- STEP 2: CLICK SEARCH (検索する) ---
+        # --- PHASE 3: CLICK SEARCH ---
         print("Hunting for Search button...")
         try:
-            # Look for image alt='検索する' or text
-            search_btn = driver.find_element(By.XPATH, "//img[contains(@alt,'検索')] | //a[contains(text(),'検索')] | //input[@value='検索する']")
+            # Robust search for button
+            search_btn = driver.find_element(By.XPATH, "//img[contains(@alt,'検索')] | //input[@alt='検索'] | //a[contains(text(),'検索')]")
+            
+            # Scroll into view just in case
+            driver.execute_script("arguments[0].scrollIntoView(true);", search_btn)
+            time.sleep(1)
+            
+            # Click
             driver.execute_script("arguments[0].click();", search_btn)
             print("✅ CLICKED Search Button.")
             time.sleep(5)
         except Exception as e:
             print(f"❌ Search Button Failed: {e}")
 
-        # --- STEP 3: SCRAPE ---
-        rows = driver.find_elements(By.XPATH, "//tr[.//a[contains(text(),'詳細') or contains(@alt,'詳細')]]")
+        # --- PHASE 4: SCRAPE ---
+        rows = driver.find_elements(By.XPATH, "//tr[.//a[contains(@href, 'detail')]]")
         print(f"Found {len(rows)} listings on the table.")
         
         new_finds = 0
@@ -103,8 +123,7 @@ def main():
                 if link not in seen_apartments:
                     if price_int <= MAX_RENT:
                         print(f"MATCH! {text[:20]}... ({price_int})")
-                        title = text.split(" ")[0]
-                        send_discord_alert(title, f"{price_int} Yen", "Check Link", link)
+                        send_discord_alert("Apartment", f"{price_int} Yen", "Check Link", link)
                         new_finds += 1
             except:
                 pass 
@@ -115,6 +134,8 @@ def main():
             with open(SEEN_FILE, 'w') as f:
                 json.dump(seen_apartments, f)
             print(f"Sent {new_finds} alerts.")
+        else:
+            print("No new cheap listings found.")
 
     except Exception as e:
         print(f"Error: {e}")
