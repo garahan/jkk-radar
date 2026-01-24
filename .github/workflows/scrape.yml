@@ -2,8 +2,11 @@ name: JKK Radar
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # Runs every 15 minutes
-  workflow_dispatch: # Allows you to click "Run Now" manually
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   scrape:
@@ -19,16 +22,24 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install selenium webdriver-manager discord-webhook
 
       - name: Run Scraper
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python main.py
 
+      # --- THIS IS THE MAGIC PART ---
+      - name: Upload Debug Screenshots
+        if: always() # Upload even if the script crashes
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug_artifacts/
+      # ------------------------------
+
       - name: Commit and Push if changes
         uses: stefanzweifel/git-auto-commit-action@v4
         with:
           commit_message: "Updated seen apartments list"
-          branch: main
           file_pattern: seen_apartments.json
