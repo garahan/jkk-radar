@@ -7,7 +7,6 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
 from discord_webhook import DiscordWebhook, DiscordEmbed
 
 # --- CONFIGURATION ---
@@ -35,7 +34,7 @@ def send_discord_alert(title, price, size, link):
     webhook.execute()
 
 def main():
-    print("Starting JKK Smart Filler...")
+    print("Starting JKK Patient Bot...")
     driver = setup_driver()
     
     if os.path.exists(SEEN_FILE):
@@ -47,40 +46,41 @@ def main():
 
     try:
         driver.get(JKK_URL)
-        wait = WebDriverWait(driver, 10)
         print(f"Landed on: {driver.title}")
-        time.sleep(2)
-
-        # --- STEP 1: CHECK THE "WARDS" (区部) BOX ---
-        # If we don't check this, we get 0 results.
+        
+        # --- THE FIX: WAIT FOR THE FORM ---
+        wait = WebDriverWait(driver, 25) # Wait up to 25 seconds for redirect
+        
+        print("Waiting for redirect to finish...")
         try:
-            print("Looking for 'Ward Area' (区部) checkbox...")
-            # Try to find the label or input containing '区部'
-            ward_checkbox = driver.find_element(By.XPATH, "//label[contains(text(),'区部')] | //input[@type='checkbox' and contains(@title,'区部')]")
-            
-            # Scroll to it and click
-            ActionChains(driver).move_to_element(ward_checkbox).click().perform()
-            print("✅ Checked 'Ward Area' box.")
+            # Wait until the word "地域" (Region) appears. This means the Form has loaded.
+            wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '地域')]")))
+            print("✅ Redirect finished! Form loaded.")
+        except:
+            print("⚠️ Timeout waiting for form. Dumping text:")
+            print(driver.find_element(By.TAG_NAME, "body").text[:500])
+
+        # --- STEP 1: CLICK "WARD AREA" (区部) ---
+        try:
+            # JavaScript Click is most reliable for these checkboxes
+            print("Clicking 'Ward Area'...")
+            # Find the input that has '区部' in its parent or title, or just the first checkbox in the table
+            checkbox = driver.find_element(By.XPATH, "//input[@type='checkbox'][1]") 
+            driver.execute_script("arguments[0].click();", checkbox)
+            print("✅ Clicked first checkbox (Usually Ward Area).")
         except Exception as e:
-            print(f"⚠️ Could not check Ward box (Might already be checked or different layout): {e}")
+            print(f"⚠️ Checkbox warning: {e}")
 
         # --- STEP 2: CLICK SEARCH (検索する) ---
         print("Hunting for Search button...")
         try:
-            # Updated selectors based on your text "[検索する]"
-            search_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(),'検索する')] | //img[@alt='検索する'] | //input[@value='検索する'] | //img[@alt='検索']")))
-            search_btn.click()
+            # Look for image alt='検索する' or text
+            search_btn = driver.find_element(By.XPATH, "//img[contains(@alt,'検索')] | //a[contains(text(),'検索')] | //input[@value='検索する']")
+            driver.execute_script("arguments[0].click();", search_btn)
             print("✅ CLICKED Search Button.")
-        except:
-             # Backup: JavaScript Click if standard click fails
-            try:
-                btn = driver.find_element(By.XPATH, "//a[contains(text(),'検索')]")
-                driver.execute_script("arguments[0].click();", btn)
-                print("✅ Force-Clicked button via JS.")
-            except:
-                print("❌ Could not find Search button.")
-
-        time.sleep(5) # Wait for results
+            time.sleep(5)
+        except Exception as e:
+            print(f"❌ Search Button Failed: {e}")
 
         # --- STEP 3: SCRAPE ---
         rows = driver.find_elements(By.XPATH, "//tr[.//a[contains(text(),'詳細') or contains(@alt,'詳細')]]")
@@ -115,8 +115,6 @@ def main():
             with open(SEEN_FILE, 'w') as f:
                 json.dump(seen_apartments, f)
             print(f"Sent {new_finds} alerts.")
-        else:
-            print("No new cheap listings found.")
 
     except Exception as e:
         print(f"Error: {e}")
