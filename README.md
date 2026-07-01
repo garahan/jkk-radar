@@ -1,6 +1,6 @@
 # JKK Radar
 
-An automated apartment hunting bot for [JKK Tokyo (Tokyo Metropolitan Housing Supply Corporation)](https://jhomes.to-kousya.or.jp/). It continuously monitors public housing vacancies and alerts you via Telegram when affordable apartments appear near a target location — specifically **Apple Shinjuku** in Shinjuku, Tokyo.
+An automated apartment hunting bot for [JKK Tokyo (Tokyo Metropolitan Housing Supply Corporation)](https://jhomes.to-kousya.or.jp/). It continuously monitors public housing vacancies and alerts you via Telegram when affordable apartments appear near a target location in Tokyo.
 
 ---
 
@@ -13,7 +13,7 @@ JKK Radar automates this process by:
 - Filtering results by distance to your target location and monthly rent
 - Sending instant Telegram notifications so you can apply before anyone else
 
-The default target is **Apple Shinjuku store** (3-chome-29-1 Shinjuku, Shinjuku City), but you can change the target coordinates to any location.
+The default target is **Shinjuku station** (3-chome Shinjuku, Shinjuku City), but you can change the target coordinates to any location.
 
 ---
 
@@ -70,7 +70,7 @@ The default target is **Apple Shinjuku store** (3-chome-29-1 Shinjuku, Shinjuku 
 ┌─────────────────────────────────────────────────────────┐
 │  5. CALCULATE DISTANCE                                   │
 │     - Haversine formula (great-circle distance)          │
-│     - From each apartment to Apple Shinjuku              │
+│     - From each apartment to Shinjuku Store              │
 │       (35.69376°N, 139.70343°E)                          │
 └──────────────────────┬──────────────────────────────────┘
                        │
