@@ -18,28 +18,32 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.11'
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
 
       - name: Install dependencies
         run: |
-          pip install selenium webdriver-manager discord-webhook
+          pip install selenium webdriver-manager requests geopy
 
       - name: Run Scraper
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py
 
-      # --- THIS IS THE MAGIC PART ---
       - name: Upload Debug Screenshots
-        if: always() # Upload even if the script crashes
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
           path: debug_artifacts/
-      # ------------------------------
 
       - name: Commit and Push if changes
         uses: stefanzweifel/git-auto-commit-action@v4
         with:
-          commit_message: "Updated seen apartments list"
-          file_pattern: seen_apartments.json
+          commit_message: "Update seen apartments and geocache"
+          file_pattern: "seen_apartments.json geocache.json"

@@ -1,5 +1,5 @@
 selenium
 webdriver-manager
-discord-webhook
 beautifulsoup4
 requests
+geopy
