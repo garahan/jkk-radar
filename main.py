@@ -1,14 +1,20 @@
 import os
+import sys
 import time
 import json
 import re
 import math
-import requests
+
+# Ensure output is not buffered (important for CI logs)
+sys.stdout.reconfigure(line_buffering=True)
+import requests as http_requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium_stealth import stealth
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut
 
@@ -32,13 +38,42 @@ def setup_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-popup-blocking")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
     chrome_options.add_argument(
-        "user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
     )
     prefs = {"profile.default_content_setting_values.popups": 1}
     chrome_options.add_experimental_option("prefs", prefs)
-    return webdriver.Chrome(options=chrome_options)
+
+    driver = webdriver.Chrome(options=chrome_options)
+
+    stealth(
+        driver,
+        languages=["ja-JP", "ja", "en-US", "en"],
+        vendor="Google Inc.",
+        platform="Win32",
+        webgl_vendor="Intel Inc.",
+        renderer="Intel Iris OpenGL Engine",
+        fix_hairline=True,
+    )
+
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['ja-JP', 'ja', 'en-US', 'en']});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                window.chrome = {runtime: {}};
+            """
+        },
+    )
+
+    return driver
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -74,7 +109,7 @@ def geocode_address(address, cache):
         return cache[address]
 
     geolocator = Nominatim(user_agent="jkk-radar-bot/1.0")
-    queries = [address, f"{address}, Tokyo, Japan", f"{address}, 東京都"]
+    queries = [address, f"{address}, Tokyo, Japan", f"{address}, \u6771\u4eac\u90fd"]
 
     for query in queries:
         try:
@@ -82,7 +117,7 @@ def geocode_address(address, cache):
             if location:
                 result = {"lat": location.latitude, "lon": location.longitude}
                 cache[address] = result
-                time.sleep(1.1)  # respect Nominatim rate limit
+                time.sleep(1.1)
                 return result
         except GeocoderTimedOut:
             continue
@@ -103,19 +138,20 @@ def send_telegram_alert(apartments):
         text = (
             f"\U0001f3e0 *JKK Apartment Near Apple Shinjuku!*\n\n"
             f"\U0001f4cd *{apt['name']}*\n"
-            f"\U0001f4b0 \u00a5{apt['price']:,}/month\n"
+            f"\U0001f4b0 \u00a5{apt['price_display']}/month\n"
+            f"\U0001f3e2 {apt['area']} | {apt['layout']}\n"
             f"\U0001f4cf {apt['distance_km']:.1f} km from Apple Shinjuku\n"
-            f"\U0001f517 [View Details]({apt['link']})"
+            f"\U0001f4d0 {apt['floor_area']} m\u00b2"
         )
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "Markdown",
-            "disable_web_page_preview": False,
+            "disable_web_page_preview": True,
         }
         try:
-            resp = requests.post(url, json=payload, timeout=10)
+            resp = http_requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
                 print(f"Telegram alert sent: {apt['name']}")
             else:
@@ -139,117 +175,225 @@ def send_telegram_summary(total, new_count):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload, timeout=10)
+        http_requests.post(url, json=payload, timeout=10)
     except Exception:
         pass
 
 
-def scrape_jkk(driver):
-    wait = WebDriverWait(driver, 20)
-
+def navigate_to_search(driver):
+    """Navigate to JKK and handle any redirect/popup pages."""
     driver.get(JKK_URL)
-    print("Landed on redirection page.")
+    time.sleep(3)
 
+    # The site may redirect or open in same window. Check current state.
+    current_url = driver.current_url
+    title = driver.title
+    print(f"Landed on: {title} ({current_url})")
+
+    # If we hit the "おわび" (apology/maintenance) page, the site might be
+    # blocking us. Try once more after a delay.
+    page_source = driver.page_source
+    if "\u304a\u308f\u3073" in title or "\u304a\u308f\u3073" in page_source:
+        print("Hit maintenance page. Retrying after delay...")
+        time.sleep(5)
+        driver.get(JKK_URL)
+        time.sleep(5)
+        title = driver.title
+        if "\u304a\u308f\u3073" in title:
+            print("Still on maintenance page. Bot detection likely active.")
+            return False
+
+    # Handle "こちら" redirect link if present
     try:
         redirect_link = driver.find_element(By.PARTIAL_LINK_TEXT, "\u3053\u3061\u3089")
         redirect_link.click()
-        print("Clicked redirect link.")
+        time.sleep(3)
     except Exception:
-        print("Redirect link not found, waiting for auto-popup...")
+        pass
 
-    time.sleep(5)
-
+    # Handle popup windows if they opened
     all_windows = driver.window_handles
-    print(f"Detected {len(all_windows)} windows.")
     if len(all_windows) > 1:
         driver.switch_to.window(all_windows[-1])
-        print(f"Switched to: {driver.title}")
+        print(f"Switched to window: {driver.title}")
 
-    try:
-        wait.until(
-            EC.presence_of_element_located((By.XPATH, "//input[@type='checkbox']"))
-        )
-        ward_cb = driver.find_element(
-            By.XPATH,
-            "//label[contains(.,'\u533a\u90e8')]/preceding-sibling::input | "
-            "//label[contains(.,'\u533a\u90e8')]/../input",
-        )
-        if not ward_cb.is_selected():
-            driver.execute_script("arguments[0].click();", ward_cb)
-            print("Checked Ward Area.")
-    except Exception as e:
-        print(f"Checkbox error: {e}")
+    return True
 
-    try:
-        search_btn = driver.find_element(
-            By.XPATH,
-            "//img[contains(@alt,'\u691c\u7d22')] | "
-            "//a[contains(text(),'\u691c\u7d22')] | "
-            "//input[contains(@value,'\u691c\u7d22')]",
-        )
-        driver.execute_script("arguments[0].click();", search_btn)
-        print("Clicked Search.")
-    except Exception as e:
-        print(f"Search button failed: {e}")
 
-    print("Waiting for results...")
+def perform_search(driver):
+    """Check ward area and click search using JavaScript."""
+    wait = WebDriverWait(driver, 15)
+
+    # Wait for the form to load
     try:
         wait.until(
             EC.presence_of_element_located(
-                (By.XPATH, "//tr[.//a[contains(@href, 'detail')]]")
+                (By.NAME, "akiyaInitRM.akiyaRefM.allCheck")
             )
         )
-        print("Results loaded.")
     except Exception:
-        print("No results found (timeout).")
+        print("Search form not found.")
+        return False
 
-    rows = driver.find_elements(By.XPATH, "//tr[.//a[contains(@href, 'detail')]]")
-    print(f"Found {len(rows)} listings.")
+    # Check "区部" (all wards) via JavaScript
+    driver.execute_script("""
+        var checkboxes = document.querySelectorAll(
+            'input[name="akiyaInitRM.akiyaRefM.allCheck"]'
+        );
+        for (var cb of checkboxes) {
+            if (cb.getAttribute('text') === 'ALLKU' && !cb.checked) {
+                cb.click();
+            }
+        }
+    """)
+    print("Checked all ward checkboxes.")
+    time.sleep(1)
 
+    # Click the search button via JavaScript
+    driver.execute_script("""
+        var imgs = document.querySelectorAll('img[name="Image1"]');
+        if (imgs.length > 0) {
+            imgs[0].parentElement.click();
+        }
+    """)
+    print("Clicked search.")
+
+    # Wait for results page to load
+    time.sleep(5)
+
+    # Verify we're on the results page
+    try:
+        wait.until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//form[@name='frmMain']")
+            )
+        )
+        print("Results page loaded.")
+        return True
+    except Exception:
+        print("Results page did not load.")
+        return False
+
+
+def parse_results(driver):
+    """Parse the results table from the search results page."""
     apartments = []
+
+    # Find all data rows in the results table
+    # The results table has header row with: 住宅外観, 住宅名, 地域, 優先種別,
+    # 住宅種別, 間取り, 床面積[m2], 家賃[円], 共益費[円], 募集戸数
+    # followed by data rows with matching <td> cells + a detail button
+    rows = driver.find_elements(
+        By.XPATH,
+        "//form[@name='frmMain']//table//tr[.//img[contains(@src,'bt2_syousai')]]",
+    )
+
+    if not rows:
+        # Fallback: try finding rows with detail images
+        rows = driver.find_elements(
+            By.XPATH,
+            "//tr[.//img[contains(@name,'Image')]]",
+        )
+
+    print(f"Found {len(rows)} result rows.")
+
     for row in rows:
         try:
             cells = row.find_elements(By.TAG_NAME, "td")
-            text = row.text.replace("\n", " ")
-            link_el = row.find_element(
-                By.XPATH, ".//a[contains(@href, 'detail')]"
-            )
-            link = link_el.get_attribute("href")
+            if len(cells) < 8:
+                continue
 
-            name = link_el.text.strip()
-            if not name and cells:
-                name = cells[0].text.strip()
+            # cells layout: [image, name, area, priority_type, housing_type,
+            #                layout, floor_area, rent, common_fee, units, detail]
+            name = cells[1].text.strip()
+            area = cells[2].text.strip()
+            layout = cells[5].text.strip()
+            floor_area = cells[6].text.strip()
+            rent_text = cells[7].text.strip()
 
-            raw_nums = re.findall(r"[0-9,]+", text)
-            price_int = 999999
-            for s in raw_nums:
-                try:
-                    val = int(s.replace(",", ""))
-                    if val > 10000:
-                        price_int = val
-                        break
-                except Exception:
-                    continue
+            # Skip header/junk rows
+            if not name or "\u4f4f\u5b85" in name or "\u25a0" in name:
+                continue
+            if not re.search(r"\d", rent_text):
+                continue
 
-            address = ""
-            for cell in cells:
-                cell_text = cell.text.strip()
-                if re.search(r"(\u533a|\u5e02|\u753a|\u4e01\u76ee)", cell_text):
-                    address = cell_text
-                    break
-            if not address:
-                address = name
+            # Parse rent range like "206,800～233,400"
+            rent_nums = re.findall(r"[\d,]+", rent_text)
+            if rent_nums:
+                # Use the lowest rent
+                price_min = min(int(n.replace(",", "")) for n in rent_nums)
+            else:
+                price_min = 999999
+
+            # Create a unique ID from name + layout
+            uid = f"{name}_{layout}"
 
             apartments.append(
                 {
-                    "name": name or "Unknown",
-                    "price": price_int,
-                    "link": link,
-                    "address": address,
+                    "name": name,
+                    "area": area,
+                    "layout": layout,
+                    "floor_area": floor_area,
+                    "price": price_min,
+                    "price_display": rent_text,
+                    "uid": uid,
                 }
             )
+
+        except Exception as e:
+            print(f"Error parsing row: {e}")
+            continue
+
+    return apartments
+
+
+def scrape_jkk(driver):
+    """Full scraping pipeline: navigate, search, parse."""
+    if not navigate_to_search(driver):
+        return []
+
+    if not perform_search(driver):
+        return []
+
+    # First, increase results per page to 50 to reduce pagination
+    try:
+        driver.execute_script("""
+            var sel = document.querySelector(
+                'select[name="akiyaRefRM.showCount"]'
+            );
+            if (sel) {
+                sel.value = '50';
+                sel.dispatchEvent(new Event('change'));
+            }
+        """)
+        time.sleep(3)
+    except Exception:
+        pass
+
+    apartments = parse_results(driver)
+    seen_uids = {a["uid"] for a in apartments}
+
+    # Check for pagination (max 20 pages as safety limit)
+    for page in range(2, 21):
+        try:
+            next_links = driver.find_elements(
+                By.XPATH, "//a[contains(text(), '\u5f8c\u308d\u3078')]"
+            )
+            if not next_links:
+                break
+            next_links[0].click()
+            time.sleep(3)
+            print(f"Scraping page {page}...")
+            more = parse_results(driver)
+            # Detect duplicate results (means we've looped)
+            new_items = [a for a in more if a["uid"] not in seen_uids]
+            if not new_items:
+                print("No new results on this page, stopping pagination.")
+                break
+            apartments.extend(new_items)
+            seen_uids.update(a["uid"] for a in new_items)
         except Exception:
-            pass
+            break
 
     return apartments
 
@@ -262,10 +406,18 @@ def main():
 
     try:
         apartments = scrape_jkk(driver)
-        print(f"Parsed {len(apartments)} apartments.")
+        print(f"Total apartments found: {len(apartments)}")
 
+        if not apartments:
+            print("No apartments found. Site may be blocking or empty.")
+            return
+
+        # Geocode using apartment name + area
         for apt in apartments:
-            geo = geocode_address(apt["address"], geocache)
+            geo_query = f"{apt['name']} {apt['area']}, \u6771\u4eac\u90fd"
+            geo = geocode_address(geo_query, geocache)
+            if not geo:
+                geo = geocode_address(f"{apt['area']}, \u6771\u4eac\u90fd", geocache)
             if geo:
                 apt["distance_km"] = haversine_km(
                     APPLE_SHINJUKU_LAT,
@@ -278,6 +430,7 @@ def main():
 
         save_json_file(GEOCACHE_FILE, geocache)
 
+        # Filter by distance and price
         nearby_cheap = [
             a
             for a in apartments
@@ -285,8 +438,9 @@ def main():
         ]
         nearby_cheap.sort(key=lambda a: (a["distance_km"], a["price"]))
 
+        # Filter out already-seen apartments
         new_apartments = [
-            a for a in nearby_cheap if a["link"] not in seen_apartments
+            a for a in nearby_cheap if a["uid"] not in seen_apartments
         ]
         print(f"New nearby+cheap apartments: {len(new_apartments)}")
 
@@ -294,7 +448,7 @@ def main():
             send_telegram_alert(new_apartments[:10])
             send_telegram_summary(len(apartments), len(new_apartments))
 
-            seen_apartments.extend(a["link"] for a in new_apartments)
+            seen_apartments.extend(a["uid"] for a in new_apartments)
             seen_apartments = list(set(seen_apartments))
             save_json_file(SEEN_FILE, seen_apartments)
             print(f"Alerted on {min(len(new_apartments), 10)} apartments.")
@@ -303,6 +457,8 @@ def main():
 
     except Exception as e:
         print(f"Critical error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         driver.quit()
 

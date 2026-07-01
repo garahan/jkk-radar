@@ -27,7 +27,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install selenium webdriver-manager requests geopy
+          pip install selenium webdriver-manager selenium-stealth requests geopy
 
       - name: Run Scraper
         env:
