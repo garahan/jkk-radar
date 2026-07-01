@@ -1,5 +1,6 @@
 selenium
 webdriver-manager
-beautifulsoup4
+selenium-stealth
 requests
 geopy
+beautifulsoup4
