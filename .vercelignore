@@ -1,0 +1,5 @@
+scraper/
+*.py
+.env
+.env.example
+debug_artifacts/
