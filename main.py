@@ -486,13 +486,26 @@ def main():
         print(f"New affordable apartments: {len(new_apartments)}")
 
         if new_apartments:
-            send_telegram_alert(new_apartments[:10])
+            # Deduplicate by building name — keep the cheapest unit per building
+            seen_buildings = set()
+            unique_buildings = []
+            for a in new_apartments:
+                if a["name"] not in seen_buildings:
+                    seen_buildings.add(a["name"])
+                    unique_buildings.append(a)
+
+            # Sort by best match: closest + cheapest (combined score)
+            unique_buildings.sort(key=lambda a: (a["distance_km"], a["price"]))
+
+            # Only alert top 5
+            top5 = unique_buildings[:5]
+            send_telegram_alert(top5)
             send_telegram_summary(len(apartments), len(new_apartments))
 
             seen_apartments.extend(a["uid"] for a in new_apartments)
             seen_apartments = list(set(seen_apartments))
             save_json_file(SEEN_FILE, seen_apartments)
-            print(f"Alerted on {min(len(new_apartments), 10)} new apartments.")
+            print(f"Alerted on {len(top5)} unique buildings (from {len(new_apartments)} new units).")
         else:
             print("No new affordable apartments since last scan.")
 
