@@ -502,6 +502,32 @@ def main():
             send_telegram_alert(top5)
             send_telegram_summary(len(apartments), len(new_apartments))
 
+            # Save notification history
+            import datetime
+            notif_file = "notifications.json"
+            notif_history = load_json_file(notif_file) if os.path.exists(notif_file) else []
+            notif_history.append({
+                "timestamp": datetime.datetime.now().isoformat(),
+                "total_scanned": len(apartments),
+                "new_count": len(new_apartments),
+                "alerted": [
+                    {
+                        "name": a["name"],
+                        "area": a["area"],
+                        "price": a["price"],
+                        "price_display": a["price_display"],
+                        "distance_km": round(a["distance_km"], 1) if a["distance_km"] != float("inf") else None,
+                        "train_min": a.get("train_min"),
+                        "maps_url": a.get("maps_url", ""),
+                    }
+                    for a in top5
+                ],
+            })
+            # Keep last 50 notifications
+            notif_history = notif_history[-50:]
+            save_json_file(notif_file, notif_history)
+            print("Saved notifications.json")
+
             seen_apartments.extend(a["uid"] for a in new_apartments)
             seen_apartments = list(set(seen_apartments))
             save_json_file(SEEN_FILE, seen_apartments)

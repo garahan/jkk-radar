@@ -63,9 +63,14 @@
   .card .maplink{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:12px;color:var(--accent);text-decoration:none;font-family:'JetBrains Mono',monospace;}
   .card .maplink:hover{text-decoration:underline;}
   .card.notaffordable{opacity:.6;}
+  .card .star{position:absolute;top:12px;right:12px;cursor:pointer;font-size:18px;color:var(--faint);transition:all .2s;user-select:none;z-index:2;background:none;border:none;padding:0;}
+  .card .star:hover{color:var(--warm);transform:scale(1.2);}
+  .card .star.active{color:var(--warm);text-shadow:0 0 8px rgba(255,181,71,.5);}
+  .card.fav{border-color:var(--warm);box-shadow:0 0 12px rgba(255,181,71,.1);}
   .card .pricebig.over{color:var(--hot);}
   .card .pricebig{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:var(--warm);white-space:nowrap;}
   .card .pricebig small{font-size:11px;color:var(--faint);font-weight:400;}
+  .card .pricebig-wrap{display:flex;flex-direction:column;align-items:flex-end;gap:4px;}
 
   /* DISTANCE BAR */
   .distbar{margin-top:12px;height:6px;border-radius:99px;background:var(--surface);overflow:hidden;}
@@ -75,6 +80,18 @@
   .empty{text-align:center;padding:60px 20px;color:var(--faint);}
   .empty .icon{font-size:48px;display:block;margin-bottom:12px;}
   .empty p{font-size:14px;line-height:1.6;}
+
+  /* NOTIFICATION HISTORY */
+  .notif-section{margin-top:24px;border-top:1px solid var(--line);padding-top:20px;}
+  .notif-section h2{font-size:14px;color:var(--muted);margin:0 0 12px;font-weight:600;letter-spacing:.05em;}
+  .notif-item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;}
+  .notif-item .ntime{font-size:10px;color:var(--faint);font-family:'JetBrains Mono',monospace;margin-bottom:6px;}
+  .notif-item .nstats{font-size:12px;color:var(--muted);margin-bottom:8px;}
+  .notif-item .napt{display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;}
+  .notif-item .napt .nname{color:var(--text);font-weight:500;}
+  .notif-item .napt .nprice{color:var(--warm);font-family:'JetBrains Mono',monospace;font-size:11px;}
+  .notif-item .napt a{color:var(--accent);text-decoration:none;font-size:10px;margin-left:8px;}
+  .notif-empty{color:var(--faint);font-size:13px;text-align:center;padding:20px;}
 
   /* FOOTER */
   footer{margin-top:30px;text-align:center;font-size:11px;color:var(--faint);font-family:'JetBrains Mono',monospace;}
@@ -121,6 +138,11 @@
 </div>
 
 <div class="cards" id="cards"></div>
+
+<div class="notif-section">
+  <h2>📬 NOTIFICATION HISTORY</h2>
+  <div id="notifs"><div class="notif-empty">Loading history...</div></div>
+</div>
 
 <footer>JKK Radar · <a href="https://github.com/garahan/jkk-radar">Source</a> · Updates every 15 min</footer>
 <div class="toast" id="toast"></div>
@@ -225,7 +247,7 @@ function render(){
     <div class="stat"><b>${minDist!=null?minDist.toFixed(1)+'km':'—'}</b><span>Closest</span></div>
   `;
 
-  // Sort
+  // Sort: favorites first, then by selected sort
   let sorted=[...apts];
   if(currentSort==='distance') sorted.sort((a,b)=>(a.distance_km??999)-(b.distance_km??999));
   else if(currentSort==='price') sorted.sort((a,b)=>a.price-b.price);
@@ -234,6 +256,8 @@ function render(){
     const pa=parseFloat(a.floor_area)||0, pb=parseFloat(b.floor_area)||0;
     return pb-pa;
   });
+  // Favorites always on top
+  sorted.sort((a,b)=>(isFav(b.uid)?1:0)-(isFav(a.uid)?1:0));
 
   // Render cards
   const maxDist=50;
@@ -242,7 +266,10 @@ function render(){
     const distPct=a.distance_km!=null?Math.min(100,(a.distance_km/maxDist)*100):0;
     const overClass=a.affordable?'':' notaffordable';
     const priceClass=a.affordable?'':' over';
-    return `<div class="card${overClass}">
+    const favClass=isFav(a.uid)?' fav':'';
+    const starClass=isFav(a.uid)?' active':'';
+    return `<div class="card${overClass}${favClass}">
+      <button class="star${starClass}" onclick="toggleFav('${a.uid}')">★</button>
       <div class="top">
         <div class="info">
           <h3>${a.name}</h3>
@@ -255,7 +282,9 @@ function render(){
             ${a.affordable?`<span class="tag affordable">✓ ≤¥80k</span>`:`<span class="tag over">over ¥80k</span>`}
           </div>
         </div>
-        <div class="pricebig${priceClass}">${formatPrice(a.price)}<small>/mo</small></div>
+        <div class="pricebig-wrap">
+          <div class="pricebig${priceClass}">${formatPrice(a.price)}<small>/mo</small></div>
+        </div>
       </div>
       ${a.distance_km!=null?`<div class="distbar"><div class="fill" style="width:${distPct}%"></div></div>`:''}
       ${a.maps_url?`<a class="maplink" href="${a.maps_url}" target="_blank">🗺 View on Google Maps</a>`:''}
@@ -274,7 +303,57 @@ document.querySelectorAll('.sortbar button').forEach(b=>{
 });
 
 loadData();
+loadNotifs();
 setInterval(loadData,60000);
+setInterval(loadNotifs,120000);
+
+// Favorites
+function getFavs(){try{return JSON.parse(localStorage.getItem('jkk_favs')||'[]');}catch(e){return[];}}
+function isFav(uid){return getFavs().includes(uid);}
+function toggleFav(uid){
+  let favs=getFavs();
+  if(favs.includes(uid)) favs=favs.filter(f=>f!==uid);
+  else favs.push(uid);
+  localStorage.setItem('jkk_favs',JSON.stringify(favs));
+  render();
+}
+
+// Notification history
+async function loadNotifs(){
+  try{
+    const r=await fetch('notifications.json?_='+Date.now());
+    if(!r.ok) throw new Error();
+    const data=await r.json();
+    renderNotifs(data);
+  }catch(e){
+    document.getElementById('notifs').innerHTML='<div class="notif-empty">No notifications yet.</div>';
+  }
+}
+
+function renderNotifs(history){
+  if(!history||!history.length){
+    document.getElementById('notifs').innerHTML='<div class="notif-empty">No notifications sent yet.</div>';
+    return;
+  }
+  const el=document.getElementById('notifs');
+  el.innerHTML=history.slice().reverse().map(n=>{
+    const t=timeAgo(n.timestamp);
+    const aptsHtml=(n.alerted||[]).map(a=>
+      `<div class="napt">
+        <span class="nname">${a.name} <span style="color:var(--faint)">${a.area||''}</span></span>
+        <span style="display:flex;align-items:center;gap:6px;">
+          <span class="nprice">¥${(a.price||0).toLocaleString()}</span>
+          ${a.maps_url?`<a href="${a.maps_url}" target="_blank">🗺</a>`:''}
+        </span>
+      </div>`
+    ).join('');
+    return `<div class="notif-item">
+      <div class="ntime">${t} · ${new Date(n.timestamp).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
+      <div class="nstats">Scanned ${n.total_scanned} · ${n.new_count} new · Alerted ${n.alerted?.length||0}</div>
+      ${aptsHtml}
+    </div>`;
+  }).join('');
+}
 </script>
 </body>
 </html>
