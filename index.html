@@ -174,6 +174,20 @@
   .map-popup .mp-tags{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0;}
   .map-popup .mp-tag{font-size:10px;padding:2px 6px;border-radius:99px;background:#1C1F38;border:1px solid #2A2E52;color:#8A8DA8;}
   .map-popup .mp-link{margin-top:6px;font-size:11px;}
+
+  /* SETTINGS MODAL */
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:200;}
+  .modal{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;max-width:380px;width:90%;}
+  .modal h3{margin:0 0 12px;font-size:16px;}
+  .modal p{font-size:12px;color:var(--muted);line-height:1.5;margin:0 0 12px;}
+  .modal input{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:10px 12px;font-size:13px;font-family:'JetBrains Mono',monospace;margin-bottom:12px;}
+  .modal .mbtns{display:flex;gap:8px;justify-content:flex-end;}
+  .modal .mbtn{border:none;border-radius:99px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Space Grotesk',sans-serif;}
+  .modal .mbtn.save{background:var(--accent);color:#0D0E1C;}
+  .modal .mbtn.cancel{background:var(--surface);color:var(--muted);border:1px solid var(--line);}
+  .modal a{color:var(--accent);font-size:11px;}
+  .settings-cog{background:none;border:none;color:var(--faint);cursor:pointer;font-size:16px;padding:4px;}
+  .settings-cog:hover{color:var(--accent);}
 </style>
 </head>
 <body>
@@ -183,6 +197,7 @@
   <div style="display:flex;align-items:center;gap:10px;">
     <button class="trigger" id="triggerBtn" onclick="triggerScan()">⚡ Scan Now</button>
     <button class="toggle on" id="toggleBtn" onclick="toggleRadar()"><span class="switch"></span><span id="toggleLabel">ON</span></button>
+    <button class="settings-cog" onclick="openSettings()" title="Settings">⚙️</button>
     <div class="live"><div class="dot"></div> LIVE</div>
   </div>
 </div>
@@ -257,10 +272,25 @@
 <footer>JKK Radar · <a href="https://github.com/garahan/jkk-radar">Source</a> · Updates every 15 min</footer>
 <div class="toast" id="toast"></div>
 
+<div class="modal-bg" id="settingsModal" onclick="if(event.target===this)closeSettings()">
+  <div class="modal">
+    <h3>⚙️ Settings</h3>
+    <p>Enter a GitHub Personal Access Token (with <code>repo</code> + <code>workflow</code> scope) to trigger scans from the dashboard.<br><br><a href="https://github.com/settings/tokens/new?scopes=repo,workflow" target="_blank">Create token →</a></p>
+    <input type="password" id="tokenInput" placeholder="ghp_xxxxxxxxxxxx">
+    <div class="mbtns">
+      <button class="mbtn cancel" onclick="closeSettings()">Cancel</button>
+      <button class="mbtn save" onclick="saveToken()">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let DATA=null, currentSort='match', currentTab='list';
 let mapInstance=null, markerCluster=null;
 let activeFilters={rentMax:80000, distMax:50, ward:'', plan:'', affordableOnly:false, source:''};
+let radarOn=true, autoRefreshTimer=null, notifTimer=null, mapNeedsUpdate=false, filtersPopulated=false;
+const REPO='garahan/jkk-radar';
+const WORKFLOW='scrape.yml';
 
 function showToast(msg, isErr){
   const t=document.getElementById('toast');
@@ -269,47 +299,93 @@ function showToast(msg, isErr){
   setTimeout(()=>t.className='toast'+(isErr?' err':''),4000);
 }
 
+function debounce(fn, ms){
+  let t=null;
+  return function(...args){clearTimeout(t);t=setTimeout(()=>fn.apply(this,args),ms);};
+}
+
+function getGHToken(){return localStorage.getItem('gh_token')||'';}
+
+// --- SCAN NOW (GitHub Actions API) ---
 async function triggerScan(){
   const btn=document.getElementById('triggerBtn');
-  btn.disabled=true; btn.textContent='⏳ Scanning...';
+  const token=getGHToken();
+  if(!token){
+    showToast('⚠️ Add a GitHub token in Settings to trigger scans',true);
+    openSettings();
+    return;
+  }
+  btn.disabled=true; btn.textContent='⏳ Triggering...';
   try{
-    const r=await fetch('/api/trigger',{method:'POST'});
-    const d=await r.json();
-    if(r.ok){
-      showToast('✅ Scan triggered! Check Telegram in ~2 min.');
-      setTimeout(()=>{loadData();},90000);
+    const r=await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches`,{
+      method:'POST',
+      headers:{'Authorization':`token ${token}`,'Accept':'application/vnd.github.v3+json','Content-Type':'application/json'},
+      body:JSON.stringify({ref:'main'})
+    });
+    if(r.status===204){
+      showToast('✅ Scan triggered! Check Telegram in ~3 min.');
+      setTimeout(()=>{loadData();},180000);
+    }else if(r.status===403){
+      showToast('❌ Token lacks permission. Use a token with repo + workflow scope.',true);
+      openSettings();
+    }else if(r.status===404){
+      showToast('❌ Repo or workflow not found.',true);
+    }else if(r.status===401){
+      showToast('❌ Invalid token. Update it in Settings.',true);
+      openSettings();
     }else{
-      showToast('❌ '+d.error,true);
+      showToast('❌ Unexpected: HTTP '+r.status,true);
     }
   }catch(e){
-    showToast('❌ Failed to trigger scan',true);
+    showToast('❌ Network error: '+e.message,true);
   }
   btn.disabled=false; btn.textContent='⚡ Scan Now';
 }
 
-let radarOn=true;
-async function toggleRadar(){
+// --- TOGGLE (local auto-refresh) ---
+function toggleRadar(){
   const btn=document.getElementById('toggleBtn');
   const label=document.getElementById('toggleLabel');
-  btn.disabled=true;
-  const newState=!radarOn;
-  try{
-    const r=await fetch('/api/toggle',{method:'POST',body:JSON.stringify({enable:newState})});
-    const d=await r.json();
-    if(r.ok){
-      radarOn=newState;
-      btn.className='toggle '+(radarOn?'on':'off');
-      label.textContent=radarOn?'ON':'OFF';
-      showToast(radarOn?'✅ Radar activated — scanning every 15 min':'⏸ Radar paused — no auto scans');
-    }else{
-      showToast('❌ '+d.error,true);
-    }
-  }catch(e){
-    showToast('❌ Failed to toggle radar',true);
+  radarOn=!radarOn;
+  localStorage.setItem('radar_on',radarOn?'1':'0');
+  btn.className='toggle '+(radarOn?'on':'off');
+  label.textContent=radarOn?'ON':'OFF';
+  if(radarOn){
+    startAutoRefresh();
+    showToast('✅ Auto-refresh ON — updates every 60s');
+  }else{
+    stopAutoRefresh();
+    showToast('⏸ Auto-refresh paused');
   }
-  btn.disabled=false;
 }
 
+function startAutoRefresh(){
+  stopAutoRefresh();
+  autoRefreshTimer=setInterval(loadData,60000);
+  notifTimer=setInterval(loadNotifs,120000);
+}
+function stopAutoRefresh(){
+  if(autoRefreshTimer){clearInterval(autoRefreshTimer);autoRefreshTimer=null;}
+  if(notifTimer){clearInterval(notifTimer);notifTimer=null;}
+}
+
+// --- SETTINGS MODAL ---
+function openSettings(){
+  const m=document.getElementById('settingsModal');
+  m.style.display='flex';
+  const inp=document.getElementById('tokenInput');
+  inp.value=getGHToken();
+  inp.focus();
+}
+function closeSettings(){document.getElementById('settingsModal').style.display='none';}
+function saveToken(){
+  const v=document.getElementById('tokenInput').value.trim();
+  localStorage.setItem('gh_token',v);
+  closeSettings();
+  showToast(v?'✅ GitHub token saved':'✅ Token cleared');
+}
+
+// --- DATA LOADING ---
 async function loadData(){
   try{
     const r=await fetch('results.json?_='+Date.now());
@@ -322,9 +398,7 @@ async function loadData(){
   }
 }
 
-function formatPrice(p){
-  return '¥'+p.toLocaleString();
-}
+function formatPrice(p){return '\u00a5'+p.toLocaleString();}
 
 function timeAgo(iso){
   if(!iso) return '';
@@ -337,6 +411,7 @@ function timeAgo(iso){
   return Math.floor(hrs/24)+' days ago';
 }
 
+// --- FILTERING ---
 function getFiltered(){
   if(!DATA||!DATA.apartments) return [];
   return DATA.apartments.filter(a=>{
@@ -350,28 +425,39 @@ function getFiltered(){
   });
 }
 
-function updateFilters(){
+const updateFiltersDebounced=debounce(function(){
   activeFilters.rentMax=parseInt(document.getElementById('rentFilter').value);
   activeFilters.distMax=parseInt(document.getElementById('distFilter').value);
   activeFilters.ward=document.getElementById('wardFilter').value;
   activeFilters.plan=document.getElementById('planFilter').value;
   activeFilters.affordableOnly=document.getElementById('affordableOnly').checked;
   activeFilters.source=document.getElementById('sourceFilter').value;
-  document.getElementById('rentVal').textContent='¥'+activeFilters.rentMax.toLocaleString();
-  document.getElementById('distVal').textContent=activeFilters.distMax+'km';
   render();
-  if(currentTab==='map') renderMap();
+  if(currentTab==='map') scheduleMapUpdate();
+},120);
+
+function updateFilters(){
+  document.getElementById('rentVal').textContent='\u00a5'+parseInt(document.getElementById('rentFilter').value).toLocaleString();
+  document.getElementById('distVal').textContent=document.getElementById('distFilter').value+'km';
+  updateFiltersDebounced();
 }
 
+// --- TABS ---
 function switchTab(tab){
   currentTab=tab;
   document.getElementById('tabList').classList.toggle('active',tab==='list');
   document.getElementById('tabMap').classList.toggle('active',tab==='map');
   document.getElementById('listView').style.display=tab==='list'?'':'none';
   document.getElementById('mapView').style.display=tab==='map'?'':'none';
-  if(tab==='map'){
-    setTimeout(()=>{renderMap();},100);
-  }
+  if(tab==='map') setTimeout(()=>{renderMap();},50);
+}
+
+// --- MAP (optimized) ---
+function scheduleMapUpdate(){
+  if(currentTab!=='map') return;
+  if(mapNeedsUpdate) return;
+  mapNeedsUpdate=true;
+  requestAnimationFrame(()=>{mapNeedsUpdate=false;renderMap();});
 }
 
 function renderMap(){
@@ -380,17 +466,20 @@ function renderMap(){
   if(!apts.length) return;
 
   if(!mapInstance){
-    mapInstance=L.map('map',{zoomControl:true});
+    mapInstance=L.map('map',{zoomControl:true,preferCanvas:true});
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-      attribution:'© OpenStreetMap',maxZoom:19
+      attribution:'\u00a9 OpenStreetMap',maxZoom:19
     }).addTo(mapInstance);
-    markerCluster=L.markerClusterGroup({maxClusterRadius:60,showCoverageOnHover:false});
+    markerCluster=L.markerClusterGroup({
+      maxClusterRadius:60,showCoverageOnHover:false,
+      chunkedLoading:true,spiderfyOnMaxZoom:true
+    });
     mapInstance.addLayer(markerCluster);
   } else {
     markerCluster.clearLayers();
   }
 
-  apts.forEach(a=>{
+  const markers=apts.map(a=>{
     const color=(a.source||'JKK')==='UR'?'#B5179E':(a.affordable?'#4DD6C1':'#FF5D5D');
     const score=a.match_score||0;
     const marker=L.circleMarker([a.lat,a.lon],{
@@ -401,81 +490,73 @@ function renderMap(){
       <div class="mp-name">${a.name}</div>
       <div class="mp-tags">
         <span class="mp-tag">${a.source||'JKK'}</span>
-        <span class="mp-tag">📍 ${a.area}</span>
-        <span class="mp-tag">🏠 ${a.layout}</span>
-        <span class="mp-tag">📐 ${a.floor_area}m²</span>
-        ${a.distance_km!=null?`<span class="mp-tag">📏 ${a.distance_km}km</span>`:''}
-        ${a.train_min?`<span class="mp-tag">🚇 ~${a.train_min}min</span>`:''}
+        <span class="mp-tag">\ud83d\udccd ${a.area}</span>
+        <span class="mp-tag">\ud83c\udfe0 ${a.layout}</span>
+        <span class="mp-tag">\ud83d\udccf ${a.floor_area}m\u00b2</span>
+        ${a.distance_km!=null?`<span class="mp-tag">\ud83d\udccf ${a.distance_km}km</span>`:''}
+        ${a.train_min?`<span class="mp-tag">\ud83d\ude87 ~${a.train_min}min</span>`:''}
       </div>
-      <div style="font-size:14px;font-weight:700;color:#FFB547;">¥${a.price.toLocaleString()}/mo</div>
-      <div style="font-size:11px;color:#8A8DA8;margin-top:4px;">${'⭐'.repeat(Math.floor(score))}${score%1>=0.5?'½':''} ${score.toFixed(1)}/5 match</div>
-      ${(a.transit_steps||[]).length?`<div style="margin-top:6px;font-size:10px;color:#8A8DA8;line-height:1.4;">${a.transit_steps.map(s=>{const ic=s.mode==='walk'?'🚶':(s.vehicle==='bus'?'🚌':'🚆');return ic+' '+s.duration_min+'m';}).join(' → ')}</div>`:''}
-      ${a.maps_url?`<div class="mp-link"><a href="${a.maps_url}" target="_blank">🗺 Google Maps</a></div>`:''}
+      <div style="font-size:14px;font-weight:700;color:#FFB547;">\u00a5${a.price.toLocaleString()}/mo</div>
+      <div style="font-size:11px;color:#8A8DA8;margin-top:4px;">${'\u2b50'.repeat(Math.floor(score))}${score%1>=0.5?'\u00bd':''} ${score.toFixed(1)}/5 match</div>
+      ${(a.transit_steps||[]).length?`<div style="margin-top:6px;font-size:10px;color:#8A8DA8;line-height:1.4;">${a.transit_steps.map(s=>{const ic=s.mode==='walk'?'\ud83d\udeb6':(s.vehicle==='bus'?'\ud83d\ude8c':'\ud83d\ude86');return ic+' '+s.duration_min+'m';}).join(' \u2192 ')}</div>`:''}
+      ${a.maps_url?`<div class="mp-link"><a href="${a.maps_url}" target="_blank">\ud83d\uddfa Google Maps</a></div>`:''}
     </div>`;
     marker.bindPopup(popup,{maxWidth:300});
     marker.on('mouseover',function(){marker.openPopup();});
     marker.on('mouseout',function(){if(!marker.isPopupOpen())marker.closePopup();});
-    markerCluster.addLayer(marker);
+    return marker;
   });
+
+  markerCluster.addLayers(markers);
 
   const bounds=L.latLngBounds(apts.map(a=>[a.lat,a.lon]));
   mapInstance.fitBounds(bounds,{padding:[40,40]});
 }
 
+// --- RENDER ---
 function render(){
   if(!DATA||!DATA.apartments||!DATA.apartments.length){
     document.getElementById('cards').innerHTML=
-      '<div class="empty"><span class="icon">🔍</span><p>No apartments found in the last scan.</p></div>';
+      '<div class="empty"><span class="icon">\ud83d\udd0d</span><p>No apartments found in the last scan.</p></div>';
     return;
   }
 
-  document.getElementById('updated').textContent='Last scan: '+timeAgo(DATA.last_updated)+' · '+DATA.total+' listings · '+DATA.affordable_count+' under ¥'+((DATA.max_rent||80000)/1000)+'k';
+  document.getElementById('updated').textContent='Last scan: '+timeAgo(DATA.last_updated)+' \u00b7 '+DATA.total+' listings \u00b7 '+DATA.affordable_count+' under \u00a5'+((DATA.max_rent||80000)/1000)+'k';
 
-  // Populate filter dropdowns
-  const wards=[...new Set(DATA.apartments.map(a=>a.area))].sort();
-  const plans=[...new Set(DATA.apartments.map(a=>a.layout))].sort();
-  const wardSel=document.getElementById('wardFilter');
-  const planSel=document.getElementById('planFilter');
-  if(wardSel.children.length<=1){wards.forEach(w=>{const o=document.createElement('option');o.value=w;o.textContent=w;wardSel.appendChild(o);});}
-  if(planSel.children.length<=1){plans.forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;planSel.appendChild(o);});}
+  if(!filtersPopulated){
+    const wards=[...new Set(DATA.apartments.map(a=>a.area))].sort();
+    const plans=[...new Set(DATA.apartments.map(a=>a.layout))].sort();
+    const wardSel=document.getElementById('wardFilter');
+    const planSel=document.getElementById('planFilter');
+    wards.forEach(w=>{const o=document.createElement('option');o.value=w;o.textContent=w;wardSel.appendChild(o);});
+    plans.forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;planSel.appendChild(o);});
+    filtersPopulated=true;
+  }
 
-  // Stats
   const apts=DATA.apartments;
-  const withDist=apts.filter(a=>a.distance_km!=null);
   const affordable=apts.filter(a=>a.affordable);
-  const minPrice=Math.min(...apts.map(a=>a.price));
-  const minDist=withDist.length?Math.min(...withDist.map(a=>a.distance_km)):null;
-
   const jkkCount=apts.filter(a=>(a.source||'JKK')==='JKK').length;
   const urCount=apts.filter(a=>a.source==='UR').length;
 
   document.getElementById('stats').innerHTML=`
     <div class="stat"><b>${apts.length}</b><span>Listings</span></div>
-    <div class="stat"><b>${affordable.length}</b><span>Under ¥80k</span></div>
+    <div class="stat"><b>${affordable.length}</b><span>Under \u00a580k</span></div>
     <div class="stat"><b>${jkkCount}J / ${urCount}U</b><span>JKK / UR</span></div>
   `;
 
-  // Apply filters
   const filtered=getFiltered();
-
-  // Sort: favorites first, then by selected sort
   let sorted=[...filtered];
   if(currentSort==='match') sorted.sort((a,b)=>(b.match_score||0)-(a.match_score||0));
   else if(currentSort==='distance') sorted.sort((a,b)=>(a.distance_km??999)-(b.distance_km??999));
   else if(currentSort==='price') sorted.sort((a,b)=>a.price-b.price);
   else if(currentSort==='area') sorted.sort((a,b)=>a.area.localeCompare(b.area));
-  else if(currentSort==='size') sorted.sort((a,b)=>{
-    const pa=parseFloat(a.floor_area)||0, pb=parseFloat(b.floor_area)||0;
-    return pb-pa;
-  });
-  // Favorites always on top
+  else if(currentSort==='size') sorted.sort((a,b)=>(parseFloat(b.floor_area)||0)-(parseFloat(a.floor_area)||0));
   sorted.sort((a,b)=>(isFav(b.uid)?1:0)-(isFav(a.uid)?1:0));
 
-  // Render cards
   const maxDist=50;
   const el=document.getElementById('cards');
   if(!sorted.length){
-    el.innerHTML='<div class="empty"><span class="icon">🔍</span><p>No apartments match your filters.</p></div>';
+    el.innerHTML='<div class="empty"><span class="icon">\ud83d\udd0d</span><p>No apartments match your filters.</p></div>';
     return;
   }
   el.innerHTML=sorted.map(a=>{
@@ -488,21 +569,21 @@ function render(){
     const fullStars=Math.floor(score);
     const halfStar=score%1>=0.5;
     return `<div class="card${overClass}${favClass}">
-      <button class="star${starClass}" onclick="toggleFav('${a.uid}')">★</button>
+      <button class="star${starClass}" onclick="toggleFav('${a.uid}')">\u2605</button>
       <div class="top">
         <div class="info">
           <div class="matchrow">
-            <span class="matchstars">${'⭐'.repeat(fullStars)}${halfStar?'½':''}</span>
+            <span class="matchstars">${'\u2b50'.repeat(fullStars)}${halfStar?'\u00bd':''}</span>
             <span class="matchscore">${score.toFixed(1)}/5 match</span>
           </div>
           <h3>${a.name}</h3>
           <div class="meta">
-            <span class="tag area">📍 ${a.area}</span>
-            <span class="tag layout">🏠 ${a.layout}</span>
-            <span class="tag">📐 ${a.floor_area}m²</span>
-            ${a.distance_km!=null?`<span class="tag dist">📏 ${a.distance_km}km</span>`:''}
-            ${a.train_min?`<span class="tag train">🚇 ~${a.train_min}min</span>`:''}
-            ${a.affordable?`<span class="tag affordable">✓ ≤¥80k</span>`:`<span class="tag over">over ¥80k</span>`}
+            <span class="tag area">\ud83d\udccd ${a.area}</span>
+            <span class="tag layout">\ud83c\udfe0 ${a.layout}</span>
+            <span class="tag">\ud83d\udccf ${a.floor_area}m\u00b2</span>
+            ${a.distance_km!=null?`<span class="tag dist">\ud83d\udccf ${a.distance_km}km</span>`:''}
+            ${a.train_min?`<span class="tag train">\ud83d\ude87 ~${a.train_min}min</span>`:''}
+            ${a.affordable?`<span class="tag affordable">\u2713 \u2264\u00a580k</span>`:`<span class="tag over">over \u00a580k</span>`}
             <span class="tag ${(a.source||'JKK')==='JKK'?'source-jkk':'source-ur'}">${a.source||'JKK'}</span>
           </div>
         </div>
@@ -513,8 +594,8 @@ function render(){
       ${a.distance_km!=null?`<div class="distbar"><div class="fill" style="width:${distPct}%"></div></div>`:''}
       ${renderTransit(a)}
       <div style="display:flex;gap:12px;margin-top:8px;flex-wrap:wrap;">
-        ${a.maps_url?`<a class="maplink" href="${a.maps_url}" target="_blank">🗺️ Google Maps</a>`:''}
-        ${a.detail_url?`<a class="maplink" href="${a.detail_url}" target="_blank">📌 Listing Detail</a>`:''}
+        ${a.maps_url?`<a class="maplink" href="${a.maps_url}" target="_blank">\ud83d\uddfa\ufe0f Google Maps</a>`:''}
+        ${a.detail_url?`<a class="maplink" href="${a.detail_url}" target="_blank">\ud83d\udccc Listing Detail</a>`:''}
       </div>
     </div>`;
   }).join('');
@@ -525,23 +606,20 @@ function renderTransit(a){
   const src=a.transit_source||'estimated';
   if(!a.train_min) return '';
 
-  // If no detailed steps (estimated), show simple summary
   if(!steps.length){
     return `<div class="transit">
       <div class="transit-header">
-        <span class="tlabel">\u{1f687} Commute to Shinjuku</span>
+        <span class="tlabel">\ud83d\ude87 Commute to Shinjuku</span>
         <span class="ttotal">~${a.train_min}min</span>
       </div>
       <div class="transit-detail"><span class="tsrc">\u26a0\ufe0f Estimated (no API key)</span></div>
     </div>`;
   }
 
-  // Build visual timeline from steps
-  const vehicleIcons={train:'\u{1f686}',subway:'\u{1f687}',bus:'\u{1f68c}',walk:'\u{1f6b6}'};
-  const modeIcon={walk:'\u{1f6b6}',transit:'\u{1f686}'};
+  const vehicleIcons={train:'\ud83d\ude86',subway:'\ud83d\ude87',bus:'\ud83d\ude8c',walk:'\ud83d\udeb6'};
 
   const timelineHtml=steps.map((s,i)=>{
-    const icon=s.mode==='walk'?'\u{1f6b6}':(vehicleIcons[s.vehicle]||'\u{1f686}');
+    const icon=s.mode==='walk'?'\ud83d\udeb6':(vehicleIcons[s.vehicle]||'\ud83d\ude86');
     const cls=s.mode==='walk'?'walk':(s.vehicle||'train');
     const name=s.line?s.line:(s.mode==='walk'?'Walk':'Transit');
     return `<div class="tstep">
@@ -551,9 +629,8 @@ function renderTransit(a){
     </div>${i<steps.length-1?'<span class="tarrow">\u2192</span>':''}`;
   }).join('');
 
-  // Build detailed breakdown
   const detailHtml=steps.map(s=>{
-    const icon=s.mode==='walk'?'\u{1f6b6}':(vehicleIcons[s.vehicle]||'\u{1f686}');
+    const icon=s.mode==='walk'?'\ud83d\udeb6':(vehicleIcons[s.vehicle]||'\ud83d\ude86');
     let info='';
     if(s.mode==='walk'){
       info=s.instruction||'Walk';
@@ -572,7 +649,7 @@ function renderTransit(a){
 
   return `<div class="transit">
     <div class="transit-header">
-      <span class="tlabel">\u{1f687} Commute to Shinjuku (arrive 9:45)</span>
+      <span class="tlabel">\ud83d\ude87 Commute to Shinjuku (arrive 9:45)</span>
       <span class="ttotal">${a.train_min}min</span>
     </div>
     <div class="transit-steps">${timelineHtml}</div>
@@ -581,7 +658,7 @@ function renderTransit(a){
   </div>`;
 }
 
-// Sort buttons
+// --- SORT BUTTONS ---
 document.querySelectorAll('.sortbar button').forEach(b=>{
   b.addEventListener('click',()=>{
     document.querySelectorAll('.sortbar button').forEach(x=>x.classList.remove('active'));
@@ -591,12 +668,20 @@ document.querySelectorAll('.sortbar button').forEach(b=>{
   });
 });
 
+// --- INIT ---
+radarOn=localStorage.getItem('radar_on')!=='0';
+{
+  const btn=document.getElementById('toggleBtn');
+  const label=document.getElementById('toggleLabel');
+  btn.className='toggle '+(radarOn?'on':'off');
+  label.textContent=radarOn?'ON':'OFF';
+}
+
 loadData();
 loadNotifs();
-setInterval(loadData,60000);
-setInterval(loadNotifs,120000);
+if(radarOn) startAutoRefresh();
 
-// Favorites
+// --- FAVORITES ---
 function getFavs(){try{return JSON.parse(localStorage.getItem('jkk_favs')||'[]');}catch(e){return[];}}
 function isFav(uid){return getFavs().includes(uid);}
 function toggleFav(uid){
@@ -607,7 +692,7 @@ function toggleFav(uid){
   render();
 }
 
-// Notification history
+// --- NOTIFICATION HISTORY ---
 async function loadNotifs(){
   try{
     const r=await fetch('notifications.json?_='+Date.now());
@@ -631,14 +716,14 @@ function renderNotifs(history){
       `<div class="napt">
         <span class="nname">${a.name} <span style="color:var(--faint)">${a.area||''}</span></span>
         <span style="display:flex;align-items:center;gap:6px;">
-          <span class="nprice">¥${(a.price||0).toLocaleString()}</span>
-          ${a.maps_url?`<a href="${a.maps_url}" target="_blank">🗺</a>`:''}
+          <span class="nprice">\u00a5${(a.price||0).toLocaleString()}</span>
+          ${a.maps_url?`<a href="${a.maps_url}" target="_blank">\ud83d\uddfa</a>`:''}
         </span>
       </div>`
     ).join('');
     return `<div class="notif-item">
-      <div class="ntime">${t} · ${new Date(n.timestamp).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
-      <div class="nstats">Scanned ${n.total_scanned} · ${n.new_count} new · Alerted ${n.alerted?.length||0}</div>
+      <div class="ntime">${t} \u00b7 ${new Date(n.timestamp).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
+      <div class="nstats">Scanned ${n.total_scanned} \u00b7 ${n.new_count} new \u00b7 Alerted ${n.alerted?.length||0}</div>
       ${aptsHtml}
     </div>`;
   }).join('');
