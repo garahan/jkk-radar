@@ -82,13 +82,22 @@
 
   /* LAST UPDATED */
   .updated{font-size:11px;color:var(--faint);font-family:'JetBrains Mono',monospace;margin-bottom:16px;}
+  .header .trigger{background:var(--accent);color:#0D0E1C;border:none;border-radius:99px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Space Grotesk',sans-serif;transition:all .2s;}
+  .header .trigger:hover{box-shadow:0 0 16px rgba(77,214,193,.4);}
+  .header .trigger:disabled{opacity:.5;cursor:wait;}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--accent);border-radius:12px;padding:12px 20px;font-size:13px;color:var(--text);z-index:100;opacity:0;transition:opacity .3s;pointer-events:none;}
+  .toast.show{opacity:1;}
+  .toast.err{border-color:var(--hot);}
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>JKK <span>Radar</span></h1>
-  <div class="live"><div class="dot"></div> LIVE</div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <button class="trigger" id="triggerBtn" onclick="triggerScan()">⚡ Scan Now</button>
+    <div class="live"><div class="dot"></div> LIVE</div>
+  </div>
 </div>
 
 <div class="updated" id="updated"></div>
@@ -105,9 +114,35 @@
 <div class="cards" id="cards"></div>
 
 <footer>JKK Radar · <a href="https://github.com/garahan/jkk-radar">Source</a> · Updates every 15 min</footer>
+<div class="toast" id="toast"></div>
 
 <script>
 let DATA=null, currentSort='distance';
+
+function showToast(msg, isErr){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.className='toast show'+(isErr?' err':'');
+  setTimeout(()=>t.className='toast'+(isErr?' err':''),4000);
+}
+
+async function triggerScan(){
+  const btn=document.getElementById('triggerBtn');
+  btn.disabled=true; btn.textContent='⏳ Scanning...';
+  try{
+    const r=await fetch('/api/trigger',{method:'POST'});
+    const d=await r.json();
+    if(r.ok){
+      showToast('✅ Scan triggered! Check Telegram in ~2 min.');
+      setTimeout(()=>{loadData();},90000);
+    }else{
+      showToast('❌ '+d.error,true);
+    }
+  }catch(e){
+    showToast('❌ Failed to trigger scan',true);
+  }
+  btn.disabled=false; btn.textContent='⚡ Scan Now';
+}
 
 async function loadData(){
   try{
