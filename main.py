@@ -27,6 +27,8 @@ GEOCACHE_FILE = "geocache.json"
 SHINJUKU_LAT = 35.69376
 SHINJUKU_LON = 139.70343
 
+MAX_RENT = 80000
+
 
 def setup_driver():
     chrome_options = Options()
@@ -132,20 +134,26 @@ def send_telegram_alert(apartments):
         return
 
     for apt in apartments:
+        map_url = apt.get('maps_url', '')
+        train_min = apt.get('train_min', None)
         text = (
             f"\U0001f3e0 *JKK Apartment Alert!*\n\n"
             f"\U0001f4cd *{apt['name']}*\n"
             f"\U0001f4b0 \u00a5{apt['price_display']}/month\n"
             f"\U0001f3e2 {apt['area']} | {apt['layout']}\n"
             f"\U0001f4cf {apt['distance_km']:.1f} km from Shinjuku\n"
-            f"\U0001f4d0 {apt['floor_area']} m\u00b2"
         )
+        if train_min:
+            text += f"\U0001f687 ~{train_min} min by train from Shinjuku\n"
+        text += f"\U0001f4d0 {apt['floor_area']} m\u00b2\n"
+        if map_url:
+            text += f"\U0001f517 [View on Google Maps]({map_url})"
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "Markdown",
-            "disable_web_page_preview": True,
+            "disable_web_page_preview": False,
         }
         try:
             resp = http_requests.post(url, json=payload, timeout=10)
@@ -167,7 +175,7 @@ def send_telegram_summary(total, new_count):
 
     text = (
         f"\U0001f50d *JKK Radar Scan Complete*\n"
-        f"Scanned {total} listings \u2022 {new_count} apartments found"
+        f"Scanned {total} listings \u2022 {new_count} new affordable apartments"
     )
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -422,19 +430,35 @@ def main():
                     geo["lat"],
                     geo["lon"],
                 )
+                apt["lat"] = geo["lat"]
+                apt["lon"] = geo["lon"]
+                apt["maps_url"] = f"https://www.google.com/maps?q={geo['lat']},{geo['lon']}"
+                # Estimate train time: Tokyo avg train speed ~25 km/h + 8 min station access
+                apt["train_min"] = int(round(apt["distance_km"] / 25 * 60 + 8))
             else:
                 apt["distance_km"] = float("inf")
+                apt["lat"] = None
+                apt["lon"] = None
+                apt["maps_url"] = ""
+                apt["train_min"] = None
 
         save_json_file(GEOCACHE_FILE, geocache)
 
-        # Sort by distance (ascending), then price
-        apartments.sort(key=lambda a: (a["distance_km"], a["price"]))
+        # Filter by max rent
+        affordable = [a for a in apartments if a["price"] <= MAX_RENT]
+        print(f"After rent filter (<=\u00a5{MAX_RENT:,}): {len(affordable)} apartments")
 
-        # Save results for web dashboard
+        # Sort by distance (ascending), then price
+        affordable.sort(key=lambda a: (a["distance_km"], a["price"]))
+
+        # Save ALL results for web dashboard (unfiltered, sorted by distance)
+        all_sorted = sorted(apartments, key=lambda a: (a["distance_km"], a["price"]))
         import datetime
         results = {
             "last_updated": datetime.datetime.now().isoformat(),
-            "total": len(apartments),
+            "total": len(all_sorted),
+            "affordable_count": len(affordable),
+            "max_rent": MAX_RENT,
             "apartments": [
                 {
                     "name": a["name"],
@@ -444,22 +468,33 @@ def main():
                     "price": a["price"],
                     "price_display": a["price_display"],
                     "distance_km": round(a["distance_km"], 1) if a["distance_km"] != float("inf") else None,
+                    "train_min": a.get("train_min"),
+                    "lat": a.get("lat"),
+                    "lon": a.get("lon"),
+                    "maps_url": a.get("maps_url", ""),
                     "uid": a["uid"],
+                    "affordable": a["price"] <= MAX_RENT,
                 }
-                for a in apartments
+                for a in all_sorted
             ],
         }
         save_json_file("results.json", results)
         print("Saved results.json for dashboard.")
 
-        print(f"Total apartments to alert: {len(apartments)}")
+        # Filter out already-seen apartments (only notify NEW ones)
+        new_apartments = [a for a in affordable if a["uid"] not in seen_apartments]
+        print(f"New affordable apartments: {len(new_apartments)}")
 
-        if apartments:
-            send_telegram_alert(apartments[:10])
-            send_telegram_summary(len(apartments), len(apartments))
-            print(f"Alerted on {min(len(apartments), 10)} apartments.")
+        if new_apartments:
+            send_telegram_alert(new_apartments[:10])
+            send_telegram_summary(len(apartments), len(new_apartments))
+
+            seen_apartments.extend(a["uid"] for a in new_apartments)
+            seen_apartments = list(set(seen_apartments))
+            save_json_file(SEEN_FILE, seen_apartments)
+            print(f"Alerted on {min(len(new_apartments), 10)} new apartments.")
         else:
-            print("No apartments found.")
+            print("No new affordable apartments since last scan.")
 
     except Exception as e:
         print(f"Critical error: {e}")

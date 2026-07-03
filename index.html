@@ -57,7 +57,13 @@
   .card .tag.dist{color:var(--accent);border-color:rgba(77,214,193,.3);}
   .card .tag.price{color:var(--warm);border-color:rgba(255,181,71,.3);}
   .card .tag.layout{color:var(--accent2);border-color:rgba(157,123,255,.3);}
-  .card .tag.area{color:var(--muted);}
+  .card .tag.train{color:var(--accent2);border-color:rgba(157,123,255,.3);}
+  .card .tag.affordable{color:var(--green);border-color:rgba(63,185,80,.3);background:rgba(63,185,80,.08);}
+  .card .tag.over{color:var(--hot);border-color:rgba(255,93,93,.2);opacity:.6;}
+  .card .maplink{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:12px;color:var(--accent);text-decoration:none;font-family:'JetBrains Mono',monospace;}
+  .card .maplink:hover{text-decoration:underline;}
+  .card.notaffordable{opacity:.6;}
+  .card .pricebig.over{color:var(--hot);}
   .card .pricebig{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:var(--warm);white-space:nowrap;}
   .card .pricebig small{font-size:11px;color:var(--faint);font-weight:400;}
 
@@ -137,19 +143,19 @@ function render(){
     return;
   }
 
-  document.getElementById('updated').textContent='Last scan: '+timeAgo(DATA.last_updated)+' · '+DATA.total+' listings';
+  document.getElementById('updated').textContent='Last scan: '+timeAgo(DATA.last_updated)+' · '+DATA.total+' listings · '+DATA.affordable_count+' under ¥'+((DATA.max_rent||80000)/1000)+'k';
 
   // Stats
   const apts=DATA.apartments;
   const withDist=apts.filter(a=>a.distance_km!=null);
+  const affordable=apts.filter(a=>a.affordable);
   const minPrice=Math.min(...apts.map(a=>a.price));
   const minDist=withDist.length?Math.min(...withDist.map(a=>a.distance_km)):null;
-  const areas=[...new Set(apts.map(a=>a.area))];
 
   document.getElementById('stats').innerHTML=`
     <div class="stat"><b>${apts.length}</b><span>Listings</span></div>
+    <div class="stat"><b>${affordable.length}</b><span>Under ¥80k</span></div>
     <div class="stat"><b>${minDist!=null?minDist.toFixed(1)+'km':'—'}</b><span>Closest</span></div>
-    <div class="stat"><b>¥${(minPrice/1000).toFixed(0)}k</b><span>Lowest</span></div>
   `;
 
   // Sort
@@ -167,7 +173,9 @@ function render(){
   const el=document.getElementById('cards');
   el.innerHTML=sorted.map(a=>{
     const distPct=a.distance_km!=null?Math.min(100,(a.distance_km/maxDist)*100):0;
-    return `<div class="card">
+    const overClass=a.affordable?'':' notaffordable';
+    const priceClass=a.affordable?'':' over';
+    return `<div class="card${overClass}">
       <div class="top">
         <div class="info">
           <h3>${a.name}</h3>
@@ -176,11 +184,14 @@ function render(){
             <span class="tag layout">🏠 ${a.layout}</span>
             <span class="tag">📐 ${a.floor_area}m²</span>
             ${a.distance_km!=null?`<span class="tag dist">📏 ${a.distance_km}km</span>`:''}
+            ${a.train_min?`<span class="tag train">🚇 ~${a.train_min}min</span>`:''}
+            ${a.affordable?`<span class="tag affordable">✓ ≤¥80k</span>`:`<span class="tag over">over ¥80k</span>`}
           </div>
         </div>
-        <div class="pricebig">${formatPrice(a.price)}<small>/mo</small></div>
+        <div class="pricebig${priceClass}">${formatPrice(a.price)}<small>/mo</small></div>
       </div>
       ${a.distance_km!=null?`<div class="distbar"><div class="fill" style="width:${distPct}%"></div></div>`:''}
+      ${a.maps_url?`<a class="maplink" href="${a.maps_url}" target="_blank">🗺 View on Google Maps</a>`:''}
     </div>`;
   }).join('');
 }
