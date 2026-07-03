@@ -430,6 +430,28 @@ def main():
         # Sort by distance (ascending), then price
         apartments.sort(key=lambda a: (a["distance_km"], a["price"]))
 
+        # Save results for web dashboard
+        import datetime
+        results = {
+            "last_updated": datetime.datetime.now().isoformat(),
+            "total": len(apartments),
+            "apartments": [
+                {
+                    "name": a["name"],
+                    "area": a["area"],
+                    "layout": a["layout"],
+                    "floor_area": a["floor_area"],
+                    "price": a["price"],
+                    "price_display": a["price_display"],
+                    "distance_km": round(a["distance_km"], 1) if a["distance_km"] != float("inf") else None,
+                    "uid": a["uid"],
+                }
+                for a in apartments
+            ],
+        }
+        save_json_file("results.json", results)
+        print("Saved results.json for dashboard.")
+
         print(f"Total apartments to alert: {len(apartments)}")
 
         if apartments:
