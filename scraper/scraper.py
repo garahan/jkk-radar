@@ -292,9 +292,7 @@ def send_telegram_alert(apartments):
             text += f"\U0001f687 ~{train_min} min by train from Shinjuku\n"
         text += f"\U0001f4d0 {apt['floor_area']} m\u00b2\n"
         if map_url:
-            text += f"\U0001f517 [Google Maps]({map_url})\n"
-        if detail_url:
-            text += f"\U0001f4cc [Listing Detail]({detail_url})"
+            text += f"\U0001f517 [Google Maps]({map_url})"
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {
             "chat_id": chat_id,
@@ -375,11 +373,18 @@ def send_daily_digest(active_listings, new_count, removed_count):
     avg_price = sum(a["price"] for a in affordable) / len(affordable) if affordable else 0
     avg_dist = sum(a.get("distance_km", 0) for a in affordable if a.get("distance_km")) / max(1, len([a for a in affordable if a.get("distance_km")]))
 
+    jkk_total = len([a for a in active_listings if a.get("source", "JKK") == "JKK"])
+    ur_total = len([a for a in active_listings if a.get("source") == "UR"])
+    jkk_affordable = len([a for a in affordable if a.get("source", "JKK") == "JKK"])
+    ur_affordable = len([a for a in affordable if a.get("source") == "UR"])
+
     text = (
         f"\U0001f4ca *Daily Digest*\n"
         f"_{now_str}_\n\n"
         f"*Active listings:* {len(active_listings)}\n"
+        f"  JKK: {jkk_total} | UR: {ur_total}\n"
         f"*Affordable (\u2264\u00a5{MAX_RENT:,}):* {len(affordable)}\n"
+        f"  JKK: {jkk_affordable} | UR: {ur_affordable}\n"
         f"*Avg rent:* \u00a5{int(avg_price):,}/mo\n"
         f"*Avg distance:* {avg_dist:.1f}km\n\n"
         f"*Since last digest:*\n"
