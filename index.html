@@ -70,6 +70,28 @@
   .card .maplink{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:12px;color:var(--accent);text-decoration:none;font-family:'JetBrains Mono',monospace;}
   .card .maplink:hover{text-decoration:underline;}
   .card.notaffordable{opacity:.6;}
+
+  /* TRANSIT TIMELINE */
+  .transit{margin-top:12px;background:var(--surface);border-radius:12px;padding:12px;}
+  .transit-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+  .transit-header .tlabel{font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.05em;text-transform:uppercase;}
+  .transit-header .ttotal{font-size:13px;font-weight:700;color:var(--accent);font-family:'JetBrains Mono',monospace;}
+  .transit-header .tsrc{font-size:9px;color:var(--faint);font-family:'JetBrains Mono',monospace;}
+  .transit-steps{display:flex;align-items:center;gap:0;flex-wrap:wrap;}
+  .tstep{display:flex;flex-direction:column;align-items:center;gap:2px;}
+  .tstep .ticon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;}
+  .tstep .ticon.walk{background:rgba(138,141,168,.15);}
+  .tstep .ticon.train{background:rgba(77,214,193,.15);}
+  .tstep .ticon.bus{background:rgba(255,181,71,.15);}
+  .tstep .ticon.subway{background:rgba(157,123,255,.15);}
+  .tstep .tdur{font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace;}
+  .tstep .tname{font-size:8px;color:var(--faint);max-width:60px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .tarrow{color:var(--faint);font-size:12px;margin:0 2px;align-self:center;margin-top:-8px;}
+  .transit-detail{margin-top:8px;font-size:10px;color:var(--muted);line-height:1.5;}
+  .transit-detail .tdline{display:flex;align-items:center;gap:4px;padding:2px 0;}
+  .transit-detail .tdline .tdicon{font-size:12px;}
+  .transit-detail .tdline .tddur{color:var(--accent);font-family:'JetBrains Mono',monospace;font-weight:600;}
+  .transit-detail .tdline .tdinfo{color:var(--faint);font-size:9px;}
   .card .matchstars{font-size:14px;letter-spacing:1px;margin-bottom:2px;}
   .card .matchscore{font-size:10px;color:var(--faint);font-family:'JetBrains Mono',monospace;margin-left:4px;}
   .card .matchrow{display:flex;align-items:center;gap:2px;margin-bottom:4px;}
@@ -387,6 +409,7 @@ function renderMap(){
       </div>
       <div style="font-size:14px;font-weight:700;color:#FFB547;">¥${a.price.toLocaleString()}/mo</div>
       <div style="font-size:11px;color:#8A8DA8;margin-top:4px;">${'⭐'.repeat(Math.floor(score))}${score%1>=0.5?'½':''} ${score.toFixed(1)}/5 match</div>
+      ${(a.transit_steps||[]).length?`<div style="margin-top:6px;font-size:10px;color:#8A8DA8;line-height:1.4;">${a.transit_steps.map(s=>{const ic=s.mode==='walk'?'🚶':(s.vehicle==='bus'?'🚌':'🚆');return ic+' '+s.duration_min+'m';}).join(' → ')}</div>`:''}
       ${a.maps_url?`<div class="mp-link"><a href="${a.maps_url}" target="_blank">🗺 Google Maps</a></div>`:''}
     </div>`;
     marker.bindPopup(popup,{maxWidth:300});
@@ -488,12 +511,74 @@ function render(){
         </div>
       </div>
       ${a.distance_km!=null?`<div class="distbar"><div class="fill" style="width:${distPct}%"></div></div>`:''}
+      ${renderTransit(a)}
       <div style="display:flex;gap:12px;margin-top:8px;flex-wrap:wrap;">
         ${a.maps_url?`<a class="maplink" href="${a.maps_url}" target="_blank">🗺️ Google Maps</a>`:''}
         ${a.detail_url?`<a class="maplink" href="${a.detail_url}" target="_blank">📌 Listing Detail</a>`:''}
       </div>
     </div>`;
   }).join('');
+}
+
+function renderTransit(a){
+  const steps=a.transit_steps||[];
+  const src=a.transit_source||'estimated';
+  if(!a.train_min) return '';
+
+  // If no detailed steps (estimated), show simple summary
+  if(!steps.length){
+    return `<div class="transit">
+      <div class="transit-header">
+        <span class="tlabel">\u{1f687} Commute to Shinjuku</span>
+        <span class="ttotal">~${a.train_min}min</span>
+      </div>
+      <div class="transit-detail"><span class="tsrc">\u26a0\ufe0f Estimated (no API key)</span></div>
+    </div>`;
+  }
+
+  // Build visual timeline from steps
+  const vehicleIcons={train:'\u{1f686}',subway:'\u{1f687}',bus:'\u{1f68c}',walk:'\u{1f6b6}'};
+  const modeIcon={walk:'\u{1f6b6}',transit:'\u{1f686}'};
+
+  const timelineHtml=steps.map((s,i)=>{
+    const icon=s.mode==='walk'?'\u{1f6b6}':(vehicleIcons[s.vehicle]||'\u{1f686}');
+    const cls=s.mode==='walk'?'walk':(s.vehicle||'train');
+    const name=s.line?s.line:(s.mode==='walk'?'Walk':'Transit');
+    return `<div class="tstep">
+      <div class="ticon ${cls}">${icon}</div>
+      <div class="tdur">${s.duration_min}m</div>
+      <div class="tname">${name}</div>
+    </div>${i<steps.length-1?'<span class="tarrow">\u2192</span>':''}`;
+  }).join('');
+
+  // Build detailed breakdown
+  const detailHtml=steps.map(s=>{
+    const icon=s.mode==='walk'?'\u{1f6b6}':(vehicleIcons[s.vehicle]||'\u{1f686}');
+    let info='';
+    if(s.mode==='walk'){
+      info=s.instruction||'Walk';
+    } else {
+      info=`${s.line||''} ${s.headsign?'\u2192 '+s.headsign:''} ${s.num_stops?s.num_stops+' stops':''}`;
+    }
+    return `<div class="tdline">
+      <span class="tdicon">${icon}</span>
+      <span class="tddur">${s.duration_min}min</span>
+      <span class="tdinfo">${info}</span>
+    </div>`;
+  }).join('');
+
+  const transfers=steps.filter(s=>s.mode==='transit').length-1;
+  const transferTxt=transfers>0?`${transfers} transfer${transfers>1?'s':''}`:'direct';
+
+  return `<div class="transit">
+    <div class="transit-header">
+      <span class="tlabel">\u{1f687} Commute to Shinjuku (arrive 9:45)</span>
+      <span class="ttotal">${a.train_min}min</span>
+    </div>
+    <div class="transit-steps">${timelineHtml}</div>
+    <div class="transit-detail">${detailHtml}</div>
+    <div style="margin-top:6px;font-size:9px;color:var(--faint);font-family:'JetBrains Mono',monospace;">${transferTxt} \u00b7 source: ${src}</div>
+  </div>`;
 }
 
 // Sort buttons

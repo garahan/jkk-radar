@@ -33,6 +33,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
         run: python scraper/scraper.py
 
       - name: Upload Debug Screenshots
@@ -45,10 +46,10 @@ jobs:
 
       - name: Commit and Push if changes
         run: |
-          if [ -f seen_apartments.json ] || [ -f geocache.json ] || [ -f results.json ] || [ -f notifications.json ] || [ -f telegram_offset.txt ] || [ -f last_digest.txt ]; then
+          if [ -f seen_apartments.json ] || [ -f geocache.json ] || [ -f results.json ] || [ -f notifications.json ] || [ -f telegram_offset.txt ] || [ -f last_digest.txt ] || [ -f transit_cache.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add seen_apartments.json geocache.json results.json notifications.json telegram_offset.txt last_digest.txt 2>/dev/null || true
+            git add seen_apartments.json geocache.json results.json notifications.json telegram_offset.txt last_digest.txt transit_cache.json 2>/dev/null || true
             if ! git diff --staged --quiet; then
               git commit -m "Update data files"
               git push

@@ -141,6 +141,93 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+# --- GOOGLE MAPS DIRECTIONS API ---
+TRANSIT_CACHE_FILE = "transit_cache.json"
+DESTINATION_LAT = SHINJUKU_LAT
+DESTINATION_LON = SHINJUKU_LON
+ARRIVAL_HOUR = 9
+ARRIVAL_MINUTE = 45
+
+
+def fetch_transit_directions(lat, lon):
+    """Call Google Maps Directions API for transit routing with 9:45 AM arrival.
+    
+    Returns dict with:
+      - total_min: total commute time in minutes
+      - steps: list of {mode, duration_min, instruction, line, headsign, num_stops}
+    Returns None if API unavailable or request fails.
+    """
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    if not api_key or not lat or not lon:
+        return None
+
+    # Calculate arrival timestamp for next weekday 9:45 AM JST
+    import datetime
+    from datetime import timezone, timedelta
+    jst = timezone(timedelta(hours=9))
+    now = datetime.datetime.now(jst)
+    # Next weekday at 9:45
+    target = now.replace(hour=ARRIVAL_HOUR, minute=ARRIVAL_MINUTE, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    # Skip to Monday if weekend
+    while target.weekday() >= 5:
+        target += timedelta(days=1)
+    arrival_ts = int(target.timestamp())
+
+    url = "https://maps.googleapis.com/maps/api/directions/json"
+    params = {
+        "origin": f"{lat},{lon}",
+        "destination": f"{DESTINATION_LAT},{DESTINATION_LON}",
+        "mode": "transit",
+        "arrival_time": arrival_ts,
+        "key": api_key,
+        "language": "ja",
+    }
+
+    try:
+        resp = http_requests.get(url, params=params, timeout=15)
+        data = resp.json()
+        if data.get("status") != "OK":
+            print(f"  Directions API status: {data.get('status')} for {lat},{lon}")
+            return None
+
+        route = data["routes"][0]
+        leg = route["legs"][0]
+        total_min = leg["duration"]["value"] // 60
+
+        steps = []
+        for step in leg["steps"]:
+            mode = step.get("travel_mode", "WALKING")  # WALKING, TRANSIT
+            duration_min = step["duration"]["value"] // 60
+            instruction = step.get("html_instructions", "")
+            # Strip HTML tags
+            instruction = re.sub(r"<[^>]+>", "", instruction)
+
+            step_info = {
+                "mode": "walk" if mode == "WALKING" else "transit",
+                "duration_min": duration_min,
+                "instruction": instruction,
+            }
+
+            if mode == "TRANSIT" and "transit_details" in step:
+                td = step["transit_details"]
+                line = td.get("line", {})
+                step_info["line"] = line.get("short_name", line.get("name", ""))
+                step_info["vehicle"] = line.get("vehicle", {}).get("type", "train")
+                step_info["headsign"] = td.get("headsign", "")
+                step_info["num_stops"] = td.get("num_stops", 0)
+                step_info["dep_stop"] = td.get("departure_stop", {}).get("name", "")
+                step_info["arr_stop"] = td.get("arrival_stop", {}).get("name", "")
+
+            steps.append(step_info)
+
+        return {"total_min": total_min, "steps": steps}
+    except Exception as e:
+        print(f"  Directions API error: {e}")
+        return None
+
+
 def load_json_file(path):
     if os.path.exists(path):
         with open(path, "r") as f:
@@ -837,7 +924,14 @@ def main():
             return
 
         # Geocode using apartment name + area
-        for apt in apartments:
+        transit_cache = load_json_file(TRANSIT_CACHE_FILE) if os.path.exists(TRANSIT_CACHE_FILE) else {}
+        has_gmaps_key = bool(os.environ.get("GOOGLE_MAPS_API_KEY"))
+        if has_gmaps_key:
+            print("GOOGLE_MAPS_API_KEY found — fetching detailed transit directions...")
+        else:
+            print("No GOOGLE_MAPS_API_KEY — using estimated commute times.")
+
+        for i, apt in enumerate(apartments):
             geo_query = f"{apt['name']} {apt['area']}, \u6771\u4eac\u90fd"
             geo = geocode_address(geo_query, geocache)
             if not geo:
@@ -852,16 +946,47 @@ def main():
                 apt["lat"] = geo["lat"]
                 apt["lon"] = geo["lon"]
                 apt["maps_url"] = f"https://www.google.com/maps?q={geo['lat']},{geo['lon']}"
-                # Estimate train time: Tokyo avg train speed ~25 km/h + 8 min station access
-                apt["train_min"] = int(round(apt["distance_km"] / 25 * 60 + 8))
+
+                # Try Google Maps Directions API for detailed transit info
+                cache_key = f"{geo['lat']:.4f},{geo['lon']:.4f}"
+                transit_info = None
+                if has_gmaps_key:
+                    if cache_key in transit_cache:
+                        transit_info = transit_cache[cache_key]
+                    else:
+                        time.sleep(0.3)  # Rate limit
+                        transit_info = fetch_transit_directions(geo["lat"], geo["lon"])
+                        if transit_info:
+                            transit_cache[cache_key] = transit_info
+                            # Save cache periodically (every 10 new lookups)
+                            if len(transit_cache) % 10 == 0:
+                                save_json_file(TRANSIT_CACHE_FILE, transit_cache)
+
+                if transit_info:
+                    apt["train_min"] = transit_info["total_min"]
+                    apt["transit_steps"] = transit_info["steps"]
+                    apt["transit_source"] = "google_maps"
+                else:
+                    # Fallback: estimate train time
+                    apt["train_min"] = int(round(apt["distance_km"] / 25 * 60 + 8))
+                    apt["transit_steps"] = []
+                    apt["transit_source"] = "estimated"
             else:
                 apt["distance_km"] = float("inf")
                 apt["lat"] = None
                 apt["lon"] = None
                 apt["maps_url"] = ""
                 apt["train_min"] = None
+                apt["transit_steps"] = []
+                apt["transit_source"] = "none"
+
+            if (i + 1) % 20 == 0:
+                print(f"  Geocoded {i+1}/{len(apartments)}...")
 
         save_json_file(GEOCACHE_FILE, geocache)
+        if has_gmaps_key:
+            save_json_file(TRANSIT_CACHE_FILE, transit_cache)
+            print(f"Transit cache: {len(transit_cache)} entries saved.")
 
         # Filter by max rent
         affordable = [a for a in apartments if a["price"] <= MAX_RENT]
@@ -902,6 +1027,8 @@ def main():
                     "match_score": a["match_score"],
                     "source": a.get("source", "JKK"),
                     "detail_url": a.get("detail_url", ""),
+                    "transit_steps": a.get("transit_steps", []),
+                    "transit_source": a.get("transit_source", "estimated"),
                 }
                 for a in all_sorted
             ],
