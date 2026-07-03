@@ -23,12 +23,9 @@ JKK_URL = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStar
 SEEN_FILE = "seen_apartments.json"
 GEOCACHE_FILE = "geocache.json"
 
-# Apple Shinjuku store: 3-chome-29-1 Shinjuku, Shinjuku City, Tokyo
-APPLE_SHINJUKU_LAT = 35.69376
-APPLE_SHINJUKU_LON = 139.70343
-
-MAX_DISTANCE_KM = 15.0
-MAX_RENT = 150000
+# Reference point: Shinjuku, Tokyo
+SHINJUKU_LAT = 35.69376
+SHINJUKU_LON = 139.70343
 
 
 def setup_driver():
@@ -136,11 +133,11 @@ def send_telegram_alert(apartments):
 
     for apt in apartments:
         text = (
-            f"\U0001f3e0 *JKK Apartment Near Apple Shinjuku!*\n\n"
+            f"\U0001f3e0 *JKK Apartment Alert!*\n\n"
             f"\U0001f4cd *{apt['name']}*\n"
             f"\U0001f4b0 \u00a5{apt['price_display']}/month\n"
             f"\U0001f3e2 {apt['area']} | {apt['layout']}\n"
-            f"\U0001f4cf {apt['distance_km']:.1f} km from Apple Shinjuku\n"
+            f"\U0001f4cf {apt['distance_km']:.1f} km from Shinjuku\n"
             f"\U0001f4d0 {apt['floor_area']} m\u00b2"
         )
         url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -170,7 +167,7 @@ def send_telegram_summary(total, new_count):
 
     text = (
         f"\U0001f50d *JKK Radar Scan Complete*\n"
-        f"Scanned {total} listings \u2022 {new_count} new near Apple Shinjuku"
+        f"Scanned {total} listings \u2022 {new_count} apartments found"
     )
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -420,8 +417,8 @@ def main():
                 geo = geocode_address(f"{apt['area']}, \u6771\u4eac\u90fd", geocache)
             if geo:
                 apt["distance_km"] = haversine_km(
-                    APPLE_SHINJUKU_LAT,
-                    APPLE_SHINJUKU_LON,
+                    SHINJUKU_LAT,
+                    SHINJUKU_LON,
                     geo["lat"],
                     geo["lon"],
                 )
@@ -430,30 +427,17 @@ def main():
 
         save_json_file(GEOCACHE_FILE, geocache)
 
-        # Filter by distance and price
-        nearby_cheap = [
-            a
-            for a in apartments
-            if a["distance_km"] <= MAX_DISTANCE_KM and a["price"] <= MAX_RENT
-        ]
-        nearby_cheap.sort(key=lambda a: (a["distance_km"], a["price"]))
+        # Sort by distance (ascending), then price
+        apartments.sort(key=lambda a: (a["distance_km"], a["price"]))
 
-        # Filter out already-seen apartments
-        new_apartments = [
-            a for a in nearby_cheap if a["uid"] not in seen_apartments
-        ]
-        print(f"New nearby+cheap apartments: {len(new_apartments)}")
+        print(f"Total apartments to alert: {len(apartments)}")
 
-        if new_apartments:
-            send_telegram_alert(new_apartments[:10])
-            send_telegram_summary(len(apartments), len(new_apartments))
-
-            seen_apartments.extend(a["uid"] for a in new_apartments)
-            seen_apartments = list(set(seen_apartments))
-            save_json_file(SEEN_FILE, seen_apartments)
-            print(f"Alerted on {min(len(new_apartments), 10)} apartments.")
+        if apartments:
+            send_telegram_alert(apartments[:10])
+            send_telegram_summary(len(apartments), len(apartments))
+            print(f"Alerted on {min(len(apartments), 10)} apartments.")
         else:
-            print("No new apartments matching criteria.")
+            print("No apartments found.")
 
     except Exception as e:
         print(f"Critical error: {e}")
