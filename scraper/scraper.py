@@ -230,6 +230,239 @@ def send_telegram_summary(total, new_count):
         pass
 
 
+def send_telegram_removed(removed_apartments):
+    """Send alert for apartments that disappeared from listings."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+    if not removed_apartments:
+        return
+
+    for apt in removed_apartments[:5]:
+        text = (
+            f"\u274c *Listing Removed*\n\n"
+            f"\U0001f4cd *{apt['name']}*\n"
+            f"\U0001f4b0 \u00a5{apt.get('price_display', apt.get('price', '?'))}/month\n"
+            f"\U0001f3e2 {apt.get('area', '')} | {apt.get('layout', '')}\n"
+        )
+        if apt.get('distance_km'):
+            text += f"\U0001f4cf {apt['distance_km']}km from Shinjuku\n"
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        try:
+            http_requests.post(url, json=payload, timeout=10)
+            print(f"Removed listing alert sent: {apt['name']}")
+        except Exception:
+            pass
+
+
+def send_daily_digest(active_listings, new_count, removed_count):
+    """Send a daily summary digest to Telegram."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+
+    import datetime
+    from datetime import timezone, timedelta
+    jst = timezone(timedelta(hours=9))
+    now_str = datetime.datetime.now(jst).strftime("%Y-%m-%d %H:%M JST")
+
+    affordable = [a for a in active_listings if a.get("price", 0) <= MAX_RENT]
+    avg_price = sum(a["price"] for a in affordable) / len(affordable) if affordable else 0
+    avg_dist = sum(a.get("distance_km", 0) for a in affordable if a.get("distance_km")) / max(1, len([a for a in affordable if a.get("distance_km")]))
+
+    text = (
+        f"\U0001f4ca *Daily Digest*\n"
+        f"_{now_str}_\n\n"
+        f"*Active listings:* {len(active_listings)}\n"
+        f"*Affordable (\u2264\u00a5{MAX_RENT:,}):* {len(affordable)}\n"
+        f"*Avg rent:* \u00a5{int(avg_price):,}/mo\n"
+        f"*Avg distance:* {avg_dist:.1f}km\n\n"
+        f"*Since last digest:*\n"
+    )
+    if new_count:
+        text += f"  \u2705 {new_count} new listing(s)\n"
+    if removed_count:
+        text += f"  \u274c {removed_count} removed\n"
+    if not new_count and not removed_count:
+        text += "  No changes detected.\n"
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    try:
+        http_requests.post(url, json=payload, timeout=10)
+        print("Daily digest sent.")
+    except Exception:
+        pass
+
+
+# --- TELEGRAM BOT COMMANDS ---
+TG_OFFSET_FILE = "telegram_offset.txt"
+TG_MAX_RESULTS = 10
+
+def _fp_rank(plan):
+    """Numeric rank for floor plan comparison (higher = larger)."""
+    if not plan:
+        return -1
+    m = re.match(r"^(\d+)(R|LDK|DK|D|K)$", plan.strip().upper())
+    if not m:
+        return -1
+    rooms = int(m.group(1))
+    suffix_rank = {"R": 0, "K": 1, "D": 2, "DK": 3, "LDK": 4}.get(m.group(2), -1)
+    return rooms * 10 + suffix_rank if suffix_rank >= 0 else -1
+
+def _parse_tg_command(text):
+    """Parse a backslash command. Returns (cmd_type, arg) or None."""
+    if not text or not text.strip().startswith("\\"):
+        return None
+    text = text.strip()
+    for pattern, cmd in (
+        (r"^\\rent(\d+)$", "rent"),
+        (r"^\\size(\d+(?:\.\d+)?)$", "size"),
+        (r"^\\plan(\w+)$", "plan"),
+        (r"^\\top$", "top"),
+        (r"^\\help$", "help"),
+    ):
+        m = re.match(pattern, text, re.IGNORECASE)
+        if m:
+            return (cmd, m.group(1))
+    m = re.match(r"^\\([\w\u3000-\u9fff\u30a0-\u30ff]+)$", text)
+    if m:
+        return ("ward", m.group(1))
+    return None
+
+def _filter_for_command(listings, cmd_type, arg):
+    if cmd_type == "ward":
+        q = arg.lower().replace("ward", "").replace("\u533a", "").strip()
+        return [l for l in listings if q in (l.get("area") or "").lower()]
+    if cmd_type == "rent":
+        return [l for l in listings if (l.get("price") or 0) <= int(arg)]
+    if cmd_type == "size":
+        return [l for l in listings if (float(l.get("floor_area") or 0)) >= float(arg)]
+    if cmd_type == "plan":
+        min_rank = _fp_rank(arg)
+        if min_rank < 0:
+            return []
+        return [l for l in listings if _fp_rank(l.get("layout") or "") >= min_rank]
+    if cmd_type == "top":
+        return sorted(listings, key=lambda a: (-(a.get("match_score", 0)), a.get("distance_km", 999), a.get("price", 0)))[:5]
+    return listings
+
+def _send_tg_message(token, chat_id, text):
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+def handle_telegram_commands(listings):
+    """Process pending Telegram bot commands (one-shot for CI)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+
+    offset = 0
+    if os.path.exists(TG_OFFSET_FILE):
+        try:
+            offset = int(open(TG_OFFSET_FILE).read().strip())
+        except ValueError:
+            pass
+
+    try:
+        r = http_requests.get(
+            f"https://api.telegram.org/bot{token}/getUpdates",
+            params={"offset": offset, "timeout": 0, "allowed_updates": ["message"]},
+            timeout=5,
+        )
+        data = r.json()
+        if not data.get("ok"):
+            return
+        updates = data.get("result", [])
+        if not updates:
+            return
+
+        print(f"Processing {len(updates)} Telegram command(s)...")
+        for update in updates:
+            offset = update["update_id"] + 1
+            msg = update.get("message", {})
+            text = (msg.get("text") or "").strip()
+            msg_chat_id = str(msg.get("chat", {}).get("id", ""))
+            if msg_chat_id != str(chat_id):
+                continue
+
+            parsed = _parse_tg_command(text)
+            if not parsed:
+                continue
+
+            cmd_type, arg = parsed
+            print(f"  Command: \\{cmd_type} {arg}")
+
+            if cmd_type == "help":
+                _send_tg_message(token, chat_id,
+                    "\U0001f4cc *JKK Radar Commands*\n\n"
+                    "\\top \u2014 Show top 5 best matches\n"
+                    "\\rent80000 \u2014 Listings under \u00a580,000\n"
+                    "\\size40 \u2014 Listings \u2265 40m\u00b2\n"
+                    "\\plan2DK \u2014 Listings \u2265 2DK\n"
+                    "\\\u65b0\u5bbf\u533a \u2014 Listings in Shinjuku ward\n"
+                    "\\help \u2014 Show this help"
+                )
+                continue
+
+            results = _filter_for_command(listings, cmd_type, arg)
+            total = len(results)
+            shown = results[:TG_MAX_RESULTS]
+
+            if cmd_type == "ward":
+                label = f"Ward: {arg}"
+            elif cmd_type == "rent":
+                label = f"Rent \u2264 \u00a5{int(arg):,}"
+            elif cmd_type == "size":
+                label = f"Area \u2265 {float(arg):g} m\u00b2"
+            elif cmd_type == "plan":
+                label = f"Floor plan \u2265 {str(arg).upper()}"
+            elif cmd_type == "top":
+                label = "Top 5 Best Matches"
+            else:
+                label = cmd_type
+
+            header = f"\U0001f50d <b>{label}</b> \u2014 {total} listing{'s' if total != 1 else ''} found"
+            if total > TG_MAX_RESULTS:
+                header += f"\n<i>Showing first {TG_MAX_RESULTS} of {total}</i>"
+            if total == 0:
+                header += "\n\nNo active listings match this query."
+            _send_tg_message(token, chat_id, header)
+
+            for a in shown:
+                score = a.get("match_score", 0)
+                stars = "\u2b50" * int(score)
+                body = (
+                    f"<b>{a['name']}</b>\n"
+                    f"\U0001f4b0 \u00a5{a.get('price', 0):,}/mo\n"
+                    f"\U0001f3e2 {a.get('area', '')} | {a.get('layout', '')} | {a.get('floor_area', '?')}m\u00b2\n"
+                )
+                if a.get("distance_km"):
+                    body += f"\U0001f4cf {a['distance_km']}km from Shinjuku\n"
+                if a.get("train_min"):
+                    body += f"\U0001f687 ~{a['train_min']}min by train\n"
+                body += f"{stars} ({score:.1f}/5 match)\n"
+                if a.get("maps_url"):
+                    body += f'<a href="{a["maps_url"]}">\U0001f517 Google Maps</a>'
+                _send_tg_message(token, chat_id, body)
+
+        with open(TG_OFFSET_FILE, "w") as f:
+            f.write(str(offset))
+        print(f"Telegram commands processed. Offset saved: {offset}")
+    except Exception as e:
+        print(f"Telegram command handling error: {e}")
+
+
 def navigate_to_search(driver):
     """Navigate to JKK and handle any redirect/popup pages."""
     driver.get(JKK_URL)
@@ -537,6 +770,16 @@ def main():
         new_apartments = [a for a in affordable if a["uid"] not in seen_apartments]
         print(f"New affordable apartments: {len(new_apartments)}")
 
+        # Detect removed listings (previously seen, no longer in current results)
+        current_uids = {a["uid"] for a in apartments}
+        removed_uids = [uid for uid in seen_apartments if uid not in current_uids]
+        removed_apartments = []
+        if removed_uids:
+            # We don't store full apartment details for seen UIDs, so just count them
+            print(f"Removed listings detected: {len(removed_uids)}")
+            # Clean up seen list
+            seen_apartments = [uid for uid in seen_apartments if uid in current_uids]
+
         if new_apartments:
             # Deduplicate by building name — keep the cheapest unit per building
             seen_buildings = set()
@@ -554,6 +797,10 @@ def main():
             send_telegram_alert(top5)
             send_telegram_summary(len(apartments), len(new_apartments))
 
+            # Alert on removed listings
+            if removed_uids:
+                send_telegram_removed([{"name": uid, "price_display": "?", "area": "", "layout": ""} for uid in removed_uids[:5]])
+
             # Save notification history
             import datetime
             notif_file = "notifications.json"
@@ -562,6 +809,7 @@ def main():
                 "timestamp": datetime.datetime.now().isoformat(),
                 "total_scanned": len(apartments),
                 "new_count": len(new_apartments),
+                "removed_count": len(removed_uids),
                 "alerted": [
                     {
                         "name": a["name"],
@@ -586,6 +834,36 @@ def main():
             print(f"Alerted on {len(top5)} unique buildings (from {len(new_apartments)} new units).")
         else:
             print("No new affordable apartments since last scan.")
+            if removed_uids:
+                send_telegram_removed([{"name": uid, "price_display": "?", "area": "", "layout": ""} for uid in removed_uids[:5]])
+                save_json_file(SEEN_FILE, seen_apartments)
+
+        # Daily digest (send once per day — check if last digest was >20 hours ago)
+        DIGEST_FILE = "last_digest.txt"
+        send_digest = True
+        if os.path.exists(DIGEST_FILE):
+            try:
+                import datetime
+                from datetime import timezone, timedelta
+                jst = timezone(timedelta(hours=9))
+                last = datetime.datetime.fromisoformat(open(DIGEST_FILE).read().strip())
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=jst)
+                if (datetime.datetime.now(jst) - last).total_seconds() < 20 * 3600:
+                    send_digest = False
+            except Exception:
+                pass
+
+        if send_digest:
+            send_daily_digest(apartments, len(new_apartments), len(removed_uids))
+            import datetime
+            from datetime import timezone, timedelta
+            jst = timezone(timedelta(hours=9))
+            with open(DIGEST_FILE, "w") as f:
+                f.write(datetime.datetime.now(jst).isoformat())
+
+        # Handle Telegram bot commands
+        handle_telegram_commands(apartments)
 
     except Exception as e:
         print(f"Critical error: {e}")

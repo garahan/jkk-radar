@@ -7,6 +7,11 @@
 <title>JKK Radar — Tokyo Apartments</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" crossorigin=""/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" crossorigin=""/>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js" crossorigin=""></script>
 <style>
   :root{
     --bg:#0D0E1C; --surface:#15172A; --card:#1C1F38; --line:#2A2E52;
@@ -116,6 +121,35 @@
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--accent);border-radius:12px;padding:12px 20px;font-size:13px;color:var(--text);z-index:100;opacity:0;transition:opacity .3s;pointer-events:none;}
   .toast.show{opacity:1;}
   .toast.err{border-color:var(--hot);}
+
+  /* TABS */
+  .tabs{display:flex;gap:8px;margin-bottom:16px;}
+  .tabs button{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px;font-size:14px;color:var(--muted);cursor:pointer;font-family:'Space Grotesk',sans-serif;transition:all .2s;}
+  .tabs button.active{background:var(--accent);color:#0D0E1C;border-color:var(--accent);font-weight:600;}
+
+  /* FILTERS */
+  .filters{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:16px;}
+  .filters summary{cursor:pointer;font-size:13px;color:var(--muted);font-weight:600;user-select:none;}
+  .filters .fbody{margin-top:12px;display:flex;flex-direction:column;gap:12px;}
+  .filters label{font-size:11px;color:var(--faint);font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.05em;}
+  .filters input[type=range]{width:100%;accent-color:var(--accent);}
+  .filters select{background:var(--surface);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:6px 10px;font-size:13px;font-family:'Space Grotesk',sans-serif;}
+  .filters .frow{display:flex;gap:12px;flex-wrap:wrap;}
+  .filters .frow>div{flex:1;min-width:140px;}
+  .filters .fval{font-size:12px;color:var(--accent);font-family:'JetBrains Mono',monospace;}
+  .filters .toggle-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;}
+  .filters .toggle-chip input{accent-color:var(--green);}
+
+  /* MAP */
+  #map{height:500px;border-radius:var(--r);border:1px solid var(--line);margin-bottom:16px;}
+  .leaflet-popup-content{font-family:'Space Grotesk',sans-serif;font-size:12px;}
+  .leaflet-popup-content b{color:var(--accent2);}
+  .leaflet-popup-content a{color:var(--accent);}
+  .map-popup{min-width:200px;}
+  .map-popup .mp-name{font-size:14px;font-weight:700;margin-bottom:4px;}
+  .map-popup .mp-tags{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0;}
+  .map-popup .mp-tag{font-size:10px;padding:2px 6px;border-radius:99px;background:#1C1F38;border:1px solid #2A2E52;color:#8A8DA8;}
+  .map-popup .mp-link{margin-top:6px;font-size:11px;}
 </style>
 </head>
 <body>
@@ -133,6 +167,38 @@
 
 <div class="stats" id="stats"></div>
 
+<div class="tabs">
+  <button class="active" id="tabList" onclick="switchTab('list')">📋 List View</button>
+  <button id="tabMap" onclick="switchTab('map')">🗺️ Map View</button>
+</div>
+
+<details class="filters">
+  <summary>⚙️ Filters</summary>
+  <div class="fbody">
+    <div class="frow">
+      <div>
+        <label>Max Rent: <span class="fval" id="rentVal">¥80,000</span></label>
+        <input type="range" id="rentFilter" min="10000" max="300000" step="5000" value="80000" oninput="updateFilters()">
+      </div>
+      <div>
+        <label>Max Distance: <span class="fval" id="distVal">50km</span></label>
+        <input type="range" id="distFilter" min="1" max="50" step="1" value="50" oninput="updateFilters()">
+      </div>
+    </div>
+    <div class="frow">
+      <div>
+        <label>Ward / Area</label>
+        <select id="wardFilter" onchange="updateFilters()"><option value="">All wards</option></select>
+      </div>
+      <div>
+        <label>Floor Plan</label>
+        <select id="planFilter" onchange="updateFilters()"><option value="">All layouts</option></select>
+      </div>
+    </div>
+    <label class="toggle-chip"><input type="checkbox" id="affordableOnly" onchange="updateFilters()"> Show affordable only (≤¥80k)</label>
+  </div>
+</details>
+
 <div class="sortbar">
   <button class="active" data-sort="match">⭐ Best Match</button>
   <button data-sort="distance">📏 Distance</button>
@@ -141,7 +207,13 @@
   <button data-sort="size">📐 Size</button>
 </div>
 
-<div class="cards" id="cards"></div>
+<div id="listView">
+  <div class="cards" id="cards"></div>
+</div>
+
+<div id="mapView" style="display:none;">
+  <div id="map"></div>
+</div>
 
 <div class="notif-section">
   <h2>📬 NOTIFICATION HISTORY</h2>
@@ -152,7 +224,9 @@
 <div class="toast" id="toast"></div>
 
 <script>
-let DATA=null, currentSort='match';
+let DATA=null, currentSort='match', currentTab='list';
+let mapInstance=null, markerCluster=null;
+let activeFilters={rentMax:80000, distMax:50, ward:'', plan:'', affordableOnly:false};
 
 function showToast(msg, isErr){
   const t=document.getElementById('toast');
@@ -229,6 +303,87 @@ function timeAgo(iso){
   return Math.floor(hrs/24)+' days ago';
 }
 
+function getFiltered(){
+  if(!DATA||!DATA.apartments) return [];
+  return DATA.apartments.filter(a=>{
+    if(activeFilters.affordableOnly && !a.affordable) return false;
+    if(a.price > activeFilters.rentMax) return false;
+    if(a.distance_km!=null && a.distance_km > activeFilters.distMax) return false;
+    if(activeFilters.ward && a.area !== activeFilters.ward) return false;
+    if(activeFilters.plan && a.layout !== activeFilters.plan) return false;
+    return true;
+  });
+}
+
+function updateFilters(){
+  activeFilters.rentMax=parseInt(document.getElementById('rentFilter').value);
+  activeFilters.distMax=parseInt(document.getElementById('distFilter').value);
+  activeFilters.ward=document.getElementById('wardFilter').value;
+  activeFilters.plan=document.getElementById('planFilter').value;
+  activeFilters.affordableOnly=document.getElementById('affordableOnly').checked;
+  document.getElementById('rentVal').textContent='¥'+activeFilters.rentMax.toLocaleString();
+  document.getElementById('distVal').textContent=activeFilters.distMax+'km';
+  render();
+  if(currentTab==='map') renderMap();
+}
+
+function switchTab(tab){
+  currentTab=tab;
+  document.getElementById('tabList').classList.toggle('active',tab==='list');
+  document.getElementById('tabMap').classList.toggle('active',tab==='map');
+  document.getElementById('listView').style.display=tab==='list'?'':'none';
+  document.getElementById('mapView').style.display=tab==='map'?'':'none';
+  if(tab==='map'){
+    setTimeout(()=>{renderMap();},100);
+  }
+}
+
+function renderMap(){
+  if(!DATA||!DATA.apartments) return;
+  const apts=getFiltered().filter(a=>a.lat && a.lon);
+  if(!apts.length) return;
+
+  if(!mapInstance){
+    mapInstance=L.map('map',{zoomControl:true});
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      attribution:'© OpenStreetMap',maxZoom:19
+    }).addTo(mapInstance);
+    markerCluster=L.markerClusterGroup({maxClusterRadius:60,showCoverageOnHover:false});
+    mapInstance.addLayer(markerCluster);
+  } else {
+    markerCluster.clearLayers();
+  }
+
+  apts.forEach(a=>{
+    const color=a.affordable?'#4DD6C1':'#FF5D5D';
+    const score=a.match_score||0;
+    const marker=L.circleMarker([a.lat,a.lon],{
+      radius:Math.max(8,Math.min(16,8+(parseFloat(a.floor_area)||0)/20)),
+      fillColor:color,color:'#2A2E52',weight:2,opacity:.9,fillOpacity:.75
+    });
+    const popup=`<div class="map-popup">
+      <div class="mp-name">${a.name}</div>
+      <div class="mp-tags">
+        <span class="mp-tag">📍 ${a.area}</span>
+        <span class="mp-tag">🏠 ${a.layout}</span>
+        <span class="mp-tag">📐 ${a.floor_area}m²</span>
+        ${a.distance_km!=null?`<span class="mp-tag">📏 ${a.distance_km}km</span>`:''}
+        ${a.train_min?`<span class="mp-tag">🚇 ~${a.train_min}min</span>`:''}
+      </div>
+      <div style="font-size:14px;font-weight:700;color:#FFB547;">¥${a.price.toLocaleString()}/mo</div>
+      <div style="font-size:11px;color:#8A8DA8;margin-top:4px;">${'⭐'.repeat(Math.floor(score))}${score%1>=0.5?'½':''} ${score.toFixed(1)}/5 match</div>
+      ${a.maps_url?`<div class="mp-link"><a href="${a.maps_url}" target="_blank">🗺 Google Maps</a></div>`:''}
+    </div>`;
+    marker.bindPopup(popup,{maxWidth:300});
+    marker.on('mouseover',function(){marker.openPopup();});
+    marker.on('mouseout',function(){if(!marker.isPopupOpen())marker.closePopup();});
+    markerCluster.addLayer(marker);
+  });
+
+  const bounds=L.latLngBounds(apts.map(a=>[a.lat,a.lon]));
+  mapInstance.fitBounds(bounds,{padding:[40,40]});
+}
+
 function render(){
   if(!DATA||!DATA.apartments||!DATA.apartments.length){
     document.getElementById('cards').innerHTML=
@@ -237,6 +392,14 @@ function render(){
   }
 
   document.getElementById('updated').textContent='Last scan: '+timeAgo(DATA.last_updated)+' · '+DATA.total+' listings · '+DATA.affordable_count+' under ¥'+((DATA.max_rent||80000)/1000)+'k';
+
+  // Populate filter dropdowns
+  const wards=[...new Set(DATA.apartments.map(a=>a.area))].sort();
+  const plans=[...new Set(DATA.apartments.map(a=>a.layout))].sort();
+  const wardSel=document.getElementById('wardFilter');
+  const planSel=document.getElementById('planFilter');
+  if(wardSel.children.length<=1){wards.forEach(w=>{const o=document.createElement('option');o.value=w;o.textContent=w;wardSel.appendChild(o);});}
+  if(planSel.children.length<=1){plans.forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;planSel.appendChild(o);});}
 
   // Stats
   const apts=DATA.apartments;
@@ -251,8 +414,11 @@ function render(){
     <div class="stat"><b>${minDist!=null?minDist.toFixed(1)+'km':'—'}</b><span>Closest</span></div>
   `;
 
+  // Apply filters
+  const filtered=getFiltered();
+
   // Sort: favorites first, then by selected sort
-  let sorted=[...apts];
+  let sorted=[...filtered];
   if(currentSort==='match') sorted.sort((a,b)=>(b.match_score||0)-(a.match_score||0));
   else if(currentSort==='distance') sorted.sort((a,b)=>(a.distance_km??999)-(b.distance_km??999));
   else if(currentSort==='price') sorted.sort((a,b)=>a.price-b.price);
@@ -267,6 +433,10 @@ function render(){
   // Render cards
   const maxDist=50;
   const el=document.getElementById('cards');
+  if(!sorted.length){
+    el.innerHTML='<div class="empty"><span class="icon">🔍</span><p>No apartments match your filters.</p></div>';
+    return;
+  }
   el.innerHTML=sorted.map(a=>{
     const distPct=a.distance_km!=null?Math.min(100,(a.distance_km/maxDist)*100):0;
     const overClass=a.affordable?'':' notaffordable';
@@ -276,7 +446,6 @@ function render(){
     const score=a.match_score||0;
     const fullStars=Math.floor(score);
     const halfStar=score%1>=0.5;
-    const starsHtml='⭐'.repeat(fullStars)+(halfStar?'⭐':'')+'\u00bd'.repeat(0);
     return `<div class="card${overClass}${favClass}">
       <button class="star${starClass}" onclick="toggleFav('${a.uid}')">★</button>
       <div class="top">

@@ -45,12 +45,12 @@ jobs:
 
       - name: Commit and Push if changes
         run: |
-          if [ -f seen_apartments.json ] || [ -f geocache.json ] || [ -f results.json ] || [ -f notifications.json ]; then
+          if [ -f seen_apartments.json ] || [ -f geocache.json ] || [ -f results.json ] || [ -f notifications.json ] || [ -f telegram_offset.txt ] || [ -f last_digest.txt ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add seen_apartments.json geocache.json results.json notifications.json 2>/dev/null || true
+            git add seen_apartments.json geocache.json results.json notifications.json telegram_offset.txt last_digest.txt 2>/dev/null || true
             if ! git diff --staged --quiet; then
-              git commit -m "Update seen apartments and geocache"
+              git commit -m "Update data files"
               git push
             else
               echo "No changes to commit."
