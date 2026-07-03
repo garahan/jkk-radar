@@ -2,11 +2,6 @@
   "framework": null,
   "buildCommand": null,
   "outputDirectory": ".",
-  "functions": {
-    "api/trigger.js": {
-      "runtime": "@vercel/node"
-    }
-  },
   "cleanUrls": true,
   "headers": [
     {
