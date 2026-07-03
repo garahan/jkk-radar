@@ -4,7 +4,7 @@
   "outputDirectory": ".",
   "functions": {
     "api/trigger.js": {
-      "runtime": "@vercel/node@5"
+      "runtime": "@vercel/node"
     }
   },
   "cleanUrls": true,
