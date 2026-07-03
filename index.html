@@ -175,19 +175,8 @@
   .map-popup .mp-tag{font-size:10px;padding:2px 6px;border-radius:99px;background:#1C1F38;border:1px solid #2A2E52;color:#8A8DA8;}
   .map-popup .mp-link{margin-top:6px;font-size:11px;}
 
-  /* SETTINGS MODAL */
-  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:200;}
-  .modal{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;max-width:380px;width:90%;}
-  .modal h3{margin:0 0 12px;font-size:16px;}
-  .modal p{font-size:12px;color:var(--muted);line-height:1.5;margin:0 0 12px;}
-  .modal input{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:10px 12px;font-size:13px;font-family:'JetBrains Mono',monospace;margin-bottom:12px;}
-  .modal .mbtns{display:flex;gap:8px;justify-content:flex-end;}
-  .modal .mbtn{border:none;border-radius:99px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Space Grotesk',sans-serif;}
-  .modal .mbtn.save{background:var(--accent);color:#0D0E1C;}
-  .modal .mbtn.cancel{background:var(--surface);color:var(--muted);border:1px solid var(--line);}
-  .modal a{color:var(--accent);font-size:11px;}
-  .settings-cog{background:none;border:none;color:var(--faint);cursor:pointer;font-size:16px;padding:4px;}
-  .settings-cog:hover{color:var(--accent);}
+  .header .trigger{background:var(--accent);color:#0D0E1C;border:none;border-radius:99px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Space Grotesk',sans-serif;transition:all .2s;display:inline-flex;align-items:center;gap:4px;}
+  .header .trigger:hover{box-shadow:0 0 16px rgba(77,214,193,.4);}
 </style>
 </head>
 <body>
@@ -195,9 +184,8 @@
 <div class="header">
   <h1>JKK <span>Radar</span></h1>
   <div style="display:flex;align-items:center;gap:10px;">
-    <button class="trigger" id="triggerBtn" onclick="triggerScan()">⚡ Scan Now</button>
+    <a class="trigger" id="triggerBtn" href="https://github.com/garahan/jkk-radar/actions/workflows/scrape.yml" target="_blank" style="text-decoration:none;">⚡ Scan Now</a>
     <button class="toggle on" id="toggleBtn" onclick="toggleRadar()"><span class="switch"></span><span id="toggleLabel">ON</span></button>
-    <button class="settings-cog" onclick="openSettings()" title="Settings">⚙️</button>
     <div class="live"><div class="dot"></div> LIVE</div>
   </div>
 </div>
@@ -272,25 +260,12 @@
 <footer>JKK Radar · <a href="https://github.com/garahan/jkk-radar">Source</a> · Updates every 15 min</footer>
 <div class="toast" id="toast"></div>
 
-<div class="modal-bg" id="settingsModal" onclick="if(event.target===this)closeSettings()">
-  <div class="modal">
-    <h3>⚙️ Settings</h3>
-    <p>Enter a GitHub Personal Access Token (with <code>repo</code> + <code>workflow</code> scope) to trigger scans from the dashboard.<br><br><a href="https://github.com/settings/tokens/new?scopes=repo,workflow" target="_blank">Create token →</a></p>
-    <input type="password" id="tokenInput" placeholder="ghp_xxxxxxxxxxxx">
-    <div class="mbtns">
-      <button class="mbtn cancel" onclick="closeSettings()">Cancel</button>
-      <button class="mbtn save" onclick="saveToken()">Save</button>
-    </div>
-  </div>
-</div>
 
 <script>
 let DATA=null, currentSort='match', currentTab='list';
 let mapInstance=null, markerCluster=null;
 let activeFilters={rentMax:80000, distMax:50, ward:'', plan:'', affordableOnly:false, source:''};
 let radarOn=true, autoRefreshTimer=null, notifTimer=null, mapNeedsUpdate=false, filtersPopulated=false;
-const REPO='garahan/jkk-radar';
-const WORKFLOW='scrape.yml';
 
 function showToast(msg, isErr){
   const t=document.getElementById('toast');
@@ -302,44 +277,6 @@ function showToast(msg, isErr){
 function debounce(fn, ms){
   let t=null;
   return function(...args){clearTimeout(t);t=setTimeout(()=>fn.apply(this,args),ms);};
-}
-
-function getGHToken(){return localStorage.getItem('gh_token')||'';}
-
-// --- SCAN NOW (GitHub Actions API) ---
-async function triggerScan(){
-  const btn=document.getElementById('triggerBtn');
-  const token=getGHToken();
-  if(!token){
-    showToast('⚠️ Add a GitHub token in Settings to trigger scans',true);
-    openSettings();
-    return;
-  }
-  btn.disabled=true; btn.textContent='⏳ Triggering...';
-  try{
-    const r=await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches`,{
-      method:'POST',
-      headers:{'Authorization':`token ${token}`,'Accept':'application/vnd.github.v3+json','Content-Type':'application/json'},
-      body:JSON.stringify({ref:'main'})
-    });
-    if(r.status===204){
-      showToast('✅ Scan triggered! Check Telegram in ~3 min.');
-      setTimeout(()=>{loadData();},180000);
-    }else if(r.status===403){
-      showToast('❌ Token lacks permission. Use a token with repo + workflow scope.',true);
-      openSettings();
-    }else if(r.status===404){
-      showToast('❌ Repo or workflow not found.',true);
-    }else if(r.status===401){
-      showToast('❌ Invalid token. Update it in Settings.',true);
-      openSettings();
-    }else{
-      showToast('❌ Unexpected: HTTP '+r.status,true);
-    }
-  }catch(e){
-    showToast('❌ Network error: '+e.message,true);
-  }
-  btn.disabled=false; btn.textContent='⚡ Scan Now';
 }
 
 // --- TOGGLE (local auto-refresh) ---
@@ -367,22 +304,6 @@ function startAutoRefresh(){
 function stopAutoRefresh(){
   if(autoRefreshTimer){clearInterval(autoRefreshTimer);autoRefreshTimer=null;}
   if(notifTimer){clearInterval(notifTimer);notifTimer=null;}
-}
-
-// --- SETTINGS MODAL ---
-function openSettings(){
-  const m=document.getElementById('settingsModal');
-  m.style.display='flex';
-  const inp=document.getElementById('tokenInput');
-  inp.value=getGHToken();
-  inp.focus();
-}
-function closeSettings(){document.getElementById('settingsModal').style.display='none';}
-function saveToken(){
-  const v=document.getElementById('tokenInput').value.trim();
-  localStorage.setItem('gh_token',v);
-  closeSettings();
-  showToast(v?'✅ GitHub token saved':'✅ Token cleared');
 }
 
 // --- DATA LOADING ---
