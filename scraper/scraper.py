@@ -4,6 +4,7 @@ import time
 import json
 import re
 import math
+import hashlib
 
 # Ensure output is not buffered (important for CI logs)
 sys.stdout.reconfigure(line_buffering=True)
@@ -28,6 +29,16 @@ SHINJUKU_LAT = 35.69376
 SHINJUKU_LON = 139.70343
 
 MAX_RENT = 80000
+
+# UR Chintai configuration
+UR_API_BASE = "https://chintai.r6.ur-net.go.jp/chintai/api/"
+UR_TDFK = "13"  # Tokyo prefecture
+UR_AREAS = ["01", "02", "03", "04", "05", "06"]
+UR_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Referer": "https://www.ur-net.go.jp/chintai/kanto/tokyo/list/",
+}
 
 
 def calculate_match_score(price, distance_km, train_min, floor_area):
@@ -180,8 +191,10 @@ def send_telegram_alert(apartments):
         train_min = apt.get('train_min', None)
         score = apt.get('match_score', 0)
         stars = '\u2b50' * int(score) + ('\u00bd' if score % 1 == 0.5 else '')
+        source = apt.get('source', 'JKK')
+        detail_url = apt.get('detail_url', '')
         text = (
-            f"\U0001f3e0 *JKK Apartment Alert!*\n"
+            f"\U0001f3e0 *JKK Radar Alert! [{source}]*\n"
             f"{stars} ({score:.1f}/5 match)\n\n"
             f"\U0001f4cd *{apt['name']}*\n"
             f"\U0001f4b0 \u00a5{apt['price_display']}/month\n"
@@ -192,7 +205,9 @@ def send_telegram_alert(apartments):
             text += f"\U0001f687 ~{train_min} min by train from Shinjuku\n"
         text += f"\U0001f4d0 {apt['floor_area']} m\u00b2\n"
         if map_url:
-            text += f"\U0001f517 [View on Google Maps]({map_url})"
+            text += f"\U0001f517 [Google Maps]({map_url})\n"
+        if detail_url:
+            text += f"\U0001f4cc [Listing Detail]({detail_url})"
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {
             "chat_id": chat_id,
@@ -463,6 +478,119 @@ def handle_telegram_commands(listings):
         print(f"Telegram command handling error: {e}")
 
 
+# --- UR CHINTAI SCRAPER ---
+
+def _ur_parse_yen(text):
+    """Extract integer from yen string like '62,600円'."""
+    if not text:
+        return None
+    digits = re.sub(r"[^\d]", "", str(text))
+    return int(digits) if digits else None
+
+
+def _ur_parse_area(floorspace):
+    """Parse float from area string like '61&#13217;' → 61.0."""
+    if not floorspace:
+        return None
+    import html as html_mod
+    unescaped = html_mod.unescape(str(floorspace))
+    m = re.search(r"[\d.]+", unescaped)
+    return float(m.group()) if m else None
+
+
+def _ur_parse_floor(floor_str):
+    """Parse integer from floor string like '5階' → 5."""
+    if not floor_str:
+        return None
+    m = re.search(r"\d+", str(floor_str))
+    return int(m.group()) if m else None
+
+
+def _ur_make_uid(building_id, room_id):
+    """Generate stable UID for UR listing."""
+    raw = f"{building_id}|{room_id}"
+    return "ur_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def scrape_ur():
+    """Scrape UR Chintai Tokyo listings via REST API. Returns list of apartment dicts."""
+    print("Starting UR Chintai scrape...")
+    session = http_requests.Session()
+    session.headers.update(UR_HEADERS)
+
+    all_buildings = []
+    for area_code in UR_AREAS:
+        time.sleep(0.5)
+        try:
+            resp = session.post(
+                UR_API_BASE + "bukken/search/list_bukken/",
+                data={"tdfk": UR_TDFK, "area": area_code},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            buildings = resp.json()
+            if isinstance(buildings, list):
+                all_buildings.extend(buildings)
+                print(f"  UR area {area_code}: {len(buildings)} buildings")
+        except Exception as e:
+            print(f"  UR area {area_code} failed: {e}")
+
+    print(f"UR total buildings: {len(all_buildings)}")
+
+    # Filter to buildings with vacancies
+    vacant_buildings = [b for b in all_buildings if (b.get("roomCount") or 0) > 0]
+    print(f"UR buildings with vacancies: {len(vacant_buildings)}")
+
+    apartments = []
+    for building in vacant_buildings:
+        building_id = building.get("id", "")
+        time.sleep(0.3)
+        try:
+            resp = session.post(
+                UR_API_BASE + "room/list/",
+                data={"tdfk": UR_TDFK, "id": building_id, "mode": "init"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            rooms = resp.json()
+            if not isinstance(rooms, list):
+                continue
+
+            for room in rooms:
+                room_id = room.get("id", "")
+                rent_yen = _ur_parse_yen(room.get("rent"))
+                area_sqm = _ur_parse_area(room.get("floorspace"))
+
+                if rent_yen is None:
+                    continue
+
+                name_parts = [p for p in [building.get("name", ""), room.get("name", "")] if p]
+                detail_path = room.get("urlDetail", "")
+                detail_url = ("https://www.ur-net.go.jp" + detail_path) if detail_path else ""
+
+                apt = {
+                    "name": "\u3000".join(name_parts),
+                    "area": building.get("skcs", ""),
+                    "layout": room.get("type", ""),
+                    "floor_area": str(area_sqm) if area_sqm else "?",
+                    "price": rent_yen,
+                    "price_display": f"{rent_yen:,}",
+                    "uid": _ur_make_uid(building_id, room_id),
+                    "source": "UR",
+                    "detail_url": detail_url,
+                    "address": building.get("skcs", ""),
+                    "access": building.get("access", ""),
+                    "floor": _ur_parse_floor(room.get("floor")),
+                    "management_fee": _ur_parse_yen(room.get("commonfee")),
+                }
+                apartments.append(apt)
+        except Exception as e:
+            print(f"  UR building {building_id} rooms failed: {e}")
+
+    print(f"UR total rooms scraped: {len(apartments)}")
+    return apartments
+
+
 def navigate_to_search(driver):
     """Navigate to JKK and handle any redirect/popup pages."""
     driver.get(JKK_URL)
@@ -682,17 +810,30 @@ def scrape_jkk(driver):
 
 
 def main():
-    print("Starting JKK Radar...")
+    print("Starting JKK + UR Radar...")
     driver = setup_driver()
     geocache = load_json_file(GEOCACHE_FILE)
     seen_apartments = load_json_file(SEEN_FILE)
 
     try:
+        # Scrape JKK
         apartments = scrape_jkk(driver)
-        print(f"Total apartments found: {len(apartments)}")
+        print(f"JKK apartments found: {len(apartments)}")
+
+        # Scrape UR (no Selenium needed — REST API)
+        driver.quit()
+        driver = None
+        ur_apartments = scrape_ur()
+        print(f"UR apartments found: {len(ur_apartments)}")
+
+        # Merge: tag JKK apartments with source
+        for apt in apartments:
+            apt.setdefault("source", "JKK")
+        apartments.extend(ur_apartments)
+        print(f"Total combined apartments: {len(apartments)}")
 
         if not apartments:
-            print("No apartments found. Site may be blocking or empty.")
+            print("No apartments found from either source.")
             return
 
         # Geocode using apartment name + area
@@ -759,6 +900,8 @@ def main():
                     "uid": a["uid"],
                     "affordable": a["price"] <= MAX_RENT,
                     "match_score": a["match_score"],
+                    "source": a.get("source", "JKK"),
+                    "detail_url": a.get("detail_url", ""),
                 }
                 for a in all_sorted
             ],
@@ -870,7 +1013,8 @@ def main():
         import traceback
         traceback.print_exc()
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()
 
 
 if __name__ == "__main__":

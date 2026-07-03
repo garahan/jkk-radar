@@ -65,6 +65,8 @@
   .card .tag.train{color:var(--accent2);border-color:rgba(157,123,255,.3);}
   .card .tag.affordable{color:var(--green);border-color:rgba(63,185,80,.3);background:rgba(63,185,80,.08);}
   .card .tag.over{color:var(--hot);border-color:rgba(255,93,93,.2);opacity:.6;}
+  .card .tag.source-jkk{color:var(--accent);border-color:rgba(77,214,193,.3);background:rgba(77,214,193,.05);}
+  .card .tag.source-ur{color:#B5179E;border-color:rgba(181,23,158,.3);background:rgba(181,23,158,.05);}
   .card .maplink{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:12px;color:var(--accent);text-decoration:none;font-family:'JetBrains Mono',monospace;}
   .card .maplink:hover{text-decoration:underline;}
   .card.notaffordable{opacity:.6;}
@@ -196,6 +198,16 @@
       </div>
     </div>
     <label class="toggle-chip"><input type="checkbox" id="affordableOnly" onchange="updateFilters()"> Show affordable only (≤¥80k)</label>
+    <div class="frow">
+      <div>
+        <label>Source</label>
+        <select id="sourceFilter" onchange="updateFilters()">
+          <option value="">All sources</option>
+          <option value="JKK">JKK only</option>
+          <option value="UR">UR only</option>
+        </select>
+      </div>
+    </div>
   </div>
 </details>
 
@@ -226,7 +238,7 @@
 <script>
 let DATA=null, currentSort='match', currentTab='list';
 let mapInstance=null, markerCluster=null;
-let activeFilters={rentMax:80000, distMax:50, ward:'', plan:'', affordableOnly:false};
+let activeFilters={rentMax:80000, distMax:50, ward:'', plan:'', affordableOnly:false, source:''};
 
 function showToast(msg, isErr){
   const t=document.getElementById('toast');
@@ -311,6 +323,7 @@ function getFiltered(){
     if(a.distance_km!=null && a.distance_km > activeFilters.distMax) return false;
     if(activeFilters.ward && a.area !== activeFilters.ward) return false;
     if(activeFilters.plan && a.layout !== activeFilters.plan) return false;
+    if(activeFilters.source && (a.source||'JKK') !== activeFilters.source) return false;
     return true;
   });
 }
@@ -321,6 +334,7 @@ function updateFilters(){
   activeFilters.ward=document.getElementById('wardFilter').value;
   activeFilters.plan=document.getElementById('planFilter').value;
   activeFilters.affordableOnly=document.getElementById('affordableOnly').checked;
+  activeFilters.source=document.getElementById('sourceFilter').value;
   document.getElementById('rentVal').textContent='¥'+activeFilters.rentMax.toLocaleString();
   document.getElementById('distVal').textContent=activeFilters.distMax+'km';
   render();
@@ -355,7 +369,7 @@ function renderMap(){
   }
 
   apts.forEach(a=>{
-    const color=a.affordable?'#4DD6C1':'#FF5D5D';
+    const color=(a.source||'JKK')==='UR'?'#B5179E':(a.affordable?'#4DD6C1':'#FF5D5D');
     const score=a.match_score||0;
     const marker=L.circleMarker([a.lat,a.lon],{
       radius:Math.max(8,Math.min(16,8+(parseFloat(a.floor_area)||0)/20)),
@@ -364,6 +378,7 @@ function renderMap(){
     const popup=`<div class="map-popup">
       <div class="mp-name">${a.name}</div>
       <div class="mp-tags">
+        <span class="mp-tag">${a.source||'JKK'}</span>
         <span class="mp-tag">📍 ${a.area}</span>
         <span class="mp-tag">🏠 ${a.layout}</span>
         <span class="mp-tag">📐 ${a.floor_area}m²</span>
@@ -408,10 +423,13 @@ function render(){
   const minPrice=Math.min(...apts.map(a=>a.price));
   const minDist=withDist.length?Math.min(...withDist.map(a=>a.distance_km)):null;
 
+  const jkkCount=apts.filter(a=>(a.source||'JKK')==='JKK').length;
+  const urCount=apts.filter(a=>a.source==='UR').length;
+
   document.getElementById('stats').innerHTML=`
     <div class="stat"><b>${apts.length}</b><span>Listings</span></div>
     <div class="stat"><b>${affordable.length}</b><span>Under ¥80k</span></div>
-    <div class="stat"><b>${minDist!=null?minDist.toFixed(1)+'km':'—'}</b><span>Closest</span></div>
+    <div class="stat"><b>${jkkCount}J / ${urCount}U</b><span>JKK / UR</span></div>
   `;
 
   // Apply filters
@@ -462,6 +480,7 @@ function render(){
             ${a.distance_km!=null?`<span class="tag dist">📏 ${a.distance_km}km</span>`:''}
             ${a.train_min?`<span class="tag train">🚇 ~${a.train_min}min</span>`:''}
             ${a.affordable?`<span class="tag affordable">✓ ≤¥80k</span>`:`<span class="tag over">over ¥80k</span>`}
+            <span class="tag ${(a.source||'JKK')==='JKK'?'source-jkk':'source-ur'}">${a.source||'JKK'}</span>
           </div>
         </div>
         <div class="pricebig-wrap">
@@ -469,7 +488,10 @@ function render(){
         </div>
       </div>
       ${a.distance_km!=null?`<div class="distbar"><div class="fill" style="width:${distPct}%"></div></div>`:''}
-      ${a.maps_url?`<a class="maplink" href="${a.maps_url}" target="_blank">🗺 View on Google Maps</a>`:''}
+      <div style="display:flex;gap:12px;margin-top:8px;flex-wrap:wrap;">
+        ${a.maps_url?`<a class="maplink" href="${a.maps_url}" target="_blank">🗺️ Google Maps</a>`:''}
+        ${a.detail_url?`<a class="maplink" href="${a.detail_url}" target="_blank">📌 Listing Detail</a>`:''}
+      </div>
     </div>`;
   }).join('');
 }
