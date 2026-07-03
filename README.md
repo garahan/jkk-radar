@@ -103,7 +103,7 @@ The default target is **Shinjuku station** (3-chome Shinjuku, Shinjuku City), bu
 
 ## Configuration
 
-All configuration constants are at the top of `main.py`:
+All configuration constants are at the top of `scraper.py`:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -193,7 +193,7 @@ export $(cat .env | xargs)
 ### 6. Run
 
 ```bash
-python main.py
+python scraper.py
 ```
 
 ---
@@ -239,7 +239,7 @@ The included workflow runs the scraper automatically every 15 minutes using GitH
 ```
 jkk-radar/
 │
-├── main.py                      # Main scraper script
+├── scraper.py                      # Main scraper script
 │   ├── setup_driver()           #   Configure headless Chrome
 │   ├── scrape_jkk(driver)       #   Navigate JKK site and extract listings
 │   ├── geocode_address()        #   Resolve address → coordinates
