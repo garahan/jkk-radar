@@ -108,10 +108,8 @@ All configuration constants are at the top of `main.py`:
 | Variable | Default | Description |
 |---|---|---|
 | `JKK_URL` | `https://jhomes.to-kousya.or.jp/...` | JKK vacancy search page URL |
-| `APPLE_SHINJUKU_LAT` | `35.69376` | Target latitude (Apple Shinjuku) |
-| `APPLE_SHINJUKU_LON` | `139.70343` | Target longitude (Apple Shinjuku) |
-| `MAX_DISTANCE_KM` | `15.0` | Maximum distance from target in km |
-| `MAX_RENT` | `150000` | Maximum monthly rent in yen |
+| `SHINJUKU_LAT` | `35.69376` | Target latitude (Shinjuku) |
+| `SHINJUKU_LON` | `139.70343` | Target longitude (Shinjuku) |
 | `SEEN_FILE` | `seen_apartments.json` | Path to seen apartments tracker |
 | `GEOCACHE_FILE` | `geocache.json` | Path to geocoding cache |
 
@@ -121,8 +119,8 @@ To monitor apartments near a different location, update the latitude and longitu
 
 ```python
 # Example: near Tokyo Station
-APPLE_SHINJUKU_LAT = 35.6812
-APPLE_SHINJUKU_LON = 139.7671
+SHINJUKU_LAT = 35.6812
+SHINJUKU_LON = 139.7671
 ```
 
 ---
@@ -269,11 +267,11 @@ jkk-radar/
 Each matching apartment produces a message like:
 
 ```
-🏠 JKK Apartment Near Apple Shinjuku!
+🏠 JKK Apartment Alert!
 
 📍 コーシャハイム新宿
 💰 ¥85,000/month
-📏 2.3 km from Apple Shinjuku
+📏 2.3 km from Shinjuku
 🔗 View Details
 ```
 
@@ -281,7 +279,7 @@ After all individual alerts, a summary is sent:
 
 ```
 🔍 JKK Radar Scan Complete
-Scanned 47 listings • 3 new near Apple Shinjuku
+Scanned 47 listings • 3 apartments found
 ```
 
 ---
