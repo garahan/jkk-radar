@@ -63,6 +63,9 @@
   .card .maplink{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:12px;color:var(--accent);text-decoration:none;font-family:'JetBrains Mono',monospace;}
   .card .maplink:hover{text-decoration:underline;}
   .card.notaffordable{opacity:.6;}
+  .card .matchstars{font-size:14px;letter-spacing:1px;margin-bottom:2px;}
+  .card .matchscore{font-size:10px;color:var(--faint);font-family:'JetBrains Mono',monospace;margin-left:4px;}
+  .card .matchrow{display:flex;align-items:center;gap:2px;margin-bottom:4px;}
   .card .star{position:absolute;top:12px;right:12px;cursor:pointer;font-size:18px;color:var(--faint);transition:all .2s;user-select:none;z-index:2;background:none;border:none;padding:0;}
   .card .star:hover{color:var(--warm);transform:scale(1.2);}
   .card .star.active{color:var(--warm);text-shadow:0 0 8px rgba(255,181,71,.5);}
@@ -131,7 +134,8 @@
 <div class="stats" id="stats"></div>
 
 <div class="sortbar">
-  <button class="active" data-sort="distance">📏 Distance</button>
+  <button class="active" data-sort="match">⭐ Best Match</button>
+  <button data-sort="distance">📏 Distance</button>
   <button data-sort="price">💰 Price</button>
   <button data-sort="area">📍 Area</button>
   <button data-sort="size">📐 Size</button>
@@ -148,7 +152,7 @@
 <div class="toast" id="toast"></div>
 
 <script>
-let DATA=null, currentSort='distance';
+let DATA=null, currentSort='match';
 
 function showToast(msg, isErr){
   const t=document.getElementById('toast');
@@ -249,7 +253,8 @@ function render(){
 
   // Sort: favorites first, then by selected sort
   let sorted=[...apts];
-  if(currentSort==='distance') sorted.sort((a,b)=>(a.distance_km??999)-(b.distance_km??999));
+  if(currentSort==='match') sorted.sort((a,b)=>(b.match_score||0)-(a.match_score||0));
+  else if(currentSort==='distance') sorted.sort((a,b)=>(a.distance_km??999)-(b.distance_km??999));
   else if(currentSort==='price') sorted.sort((a,b)=>a.price-b.price);
   else if(currentSort==='area') sorted.sort((a,b)=>a.area.localeCompare(b.area));
   else if(currentSort==='size') sorted.sort((a,b)=>{
@@ -268,10 +273,18 @@ function render(){
     const priceClass=a.affordable?'':' over';
     const favClass=isFav(a.uid)?' fav':'';
     const starClass=isFav(a.uid)?' active':'';
+    const score=a.match_score||0;
+    const fullStars=Math.floor(score);
+    const halfStar=score%1>=0.5;
+    const starsHtml='⭐'.repeat(fullStars)+(halfStar?'⭐':'')+'\u00bd'.repeat(0);
     return `<div class="card${overClass}${favClass}">
       <button class="star${starClass}" onclick="toggleFav('${a.uid}')">★</button>
       <div class="top">
         <div class="info">
+          <div class="matchrow">
+            <span class="matchstars">${'⭐'.repeat(fullStars)}${halfStar?'½':''}</span>
+            <span class="matchscore">${score.toFixed(1)}/5 match</span>
+          </div>
           <h3>${a.name}</h3>
           <div class="meta">
             <span class="tag area">📍 ${a.area}</span>

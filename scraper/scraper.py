@@ -30,6 +30,48 @@ SHINJUKU_LON = 139.70343
 MAX_RENT = 80000
 
 
+def calculate_match_score(price, distance_km, train_min, floor_area):
+    """Calculate 1-5 star match score balancing cheap + close + short commute.
+
+    Weights: price 40%, distance 30%, commute 30%.
+    """
+    if distance_km is None or distance_km == float("inf"):
+        return 1
+    if price is None or price <= 0:
+        return 1
+
+    # Price score: ¥20k=1.0, ¥80k=0.0 (linear)
+    price_score = max(0, min(1, (MAX_RENT - price) / (MAX_RENT - 20000)))
+
+    # Distance score: 0km=1.0, 40km=0.0 (linear)
+    dist_score = max(0, min(1, (40 - distance_km) / 40))
+
+    # Commute score: 0min=1.0, 100min=0.0 (linear)
+    if train_min and train_min > 0:
+        commute_score = max(0, min(1, (100 - train_min) / 100))
+    else:
+        commute_score = dist_score  # fallback to distance
+
+    # Bonus for larger floor area (value for money)
+    area_bonus = 0
+    try:
+        fa = float(floor_area)
+        if fa >= 50:
+            area_bonus = 0.1
+        elif fa >= 40:
+            area_bonus = 0.05
+    except (ValueError, TypeError):
+        pass
+
+    # Weighted composite
+    composite = (price_score * 0.40) + (dist_score * 0.30) + (commute_score * 0.30) + area_bonus
+    composite = max(0, min(1, composite))
+
+    # Convert to 1-5 stars (rounded to nearest 0.5)
+    stars = round(composite * 4 + 1) / 2
+    return max(1, min(5, stars))
+
+
 def setup_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
@@ -136,8 +178,11 @@ def send_telegram_alert(apartments):
     for apt in apartments:
         map_url = apt.get('maps_url', '')
         train_min = apt.get('train_min', None)
+        score = apt.get('match_score', 0)
+        stars = '\u2b50' * int(score) + ('\u00bd' if score % 1 == 0.5 else '')
         text = (
-            f"\U0001f3e0 *JKK Apartment Alert!*\n\n"
+            f"\U0001f3e0 *JKK Apartment Alert!*\n"
+            f"{stars} ({score:.1f}/5 match)\n\n"
             f"\U0001f4cd *{apt['name']}*\n"
             f"\U0001f4b0 \u00a5{apt['price_display']}/month\n"
             f"\U0001f3e2 {apt['area']} | {apt['layout']}\n"
@@ -448,11 +493,17 @@ def main():
         affordable = [a for a in apartments if a["price"] <= MAX_RENT]
         print(f"After rent filter (<=\u00a5{MAX_RENT:,}): {len(affordable)} apartments")
 
-        # Sort by distance (ascending), then price
-        affordable.sort(key=lambda a: (a["distance_km"], a["price"]))
+        # Calculate match scores for all apartments
+        for a in apartments:
+            a["match_score"] = calculate_match_score(
+                a["price"], a["distance_km"], a.get("train_min"), a.get("floor_area")
+            )
 
-        # Save ALL results for web dashboard (unfiltered, sorted by distance)
-        all_sorted = sorted(apartments, key=lambda a: (a["distance_km"], a["price"]))
+        # Sort affordable by best match score (highest first)
+        affordable.sort(key=lambda a: (-a["match_score"], a["distance_km"], a["price"]))
+
+        # Save ALL results for web dashboard (sorted by match score)
+        all_sorted = sorted(apartments, key=lambda a: (-a["match_score"], a["distance_km"], a["price"]))
         import datetime
         results = {
             "last_updated": datetime.datetime.now().isoformat(),
@@ -474,6 +525,7 @@ def main():
                     "maps_url": a.get("maps_url", ""),
                     "uid": a["uid"],
                     "affordable": a["price"] <= MAX_RENT,
+                    "match_score": a["match_score"],
                 }
                 for a in all_sorted
             ],
@@ -494,8 +546,8 @@ def main():
                     seen_buildings.add(a["name"])
                     unique_buildings.append(a)
 
-            # Sort by best match: closest + cheapest (combined score)
-            unique_buildings.sort(key=lambda a: (a["distance_km"], a["price"]))
+            # Sort by best match score (highest first)
+            unique_buildings.sort(key=lambda a: (-a["match_score"], a["distance_km"], a["price"]))
 
             # Only alert top 5
             top5 = unique_buildings[:5]
