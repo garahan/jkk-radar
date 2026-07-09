@@ -24,11 +24,37 @@ JKK_URL = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStar
 SEEN_FILE = "seen_apartments.json"
 GEOCACHE_FILE = "geocache.json"
 
-# Reference point: Shinjuku, Tokyo
-SHINJUKU_LAT = 35.69376
-SHINJUKU_LON = 139.70343
 
-MAX_RENT = 80000
+def _get_env_int(name, default):
+    v = os.environ.get(name)
+    return int(v) if v else default
+
+
+def _get_env_float(name, default):
+    v = os.environ.get(name)
+    return float(v) if v else default
+
+
+def _get_env_bool(name, default=False):
+    v = os.environ.get(name, "")
+    return str(v).lower() in ("1", "true", "yes") if v else default
+
+
+# Reference point: defaults to Shinjuku / Apple Shinjuku area
+TARGET_LAT = _get_env_float("TARGET_LAT", 35.69376)
+TARGET_LON = _get_env_float("TARGET_LON", 139.70343)
+
+MAX_RENT = _get_env_int("MAX_RENT", 80000)
+MAX_DISTANCE_KM = _get_env_float("MAX_DISTANCE_KM", 20.0)
+MIN_MATCH_SCORE = _get_env_float("MIN_MATCH_SCORE", 2.0)
+MAX_TELEGRAM_RESULTS = _get_env_int("MAX_TELEGRAM_RESULTS", 5)
+SEND_DAILY_DIGEST = _get_env_bool("SEND_DAILY_DIGEST", False)
+ALERT_REMOVED = _get_env_bool("ALERT_REMOVED", False)
+
+# Sanity check for geocoding results: must be within this distance of the target
+# or inside the broader Tokyo area. Use a generous cap to avoid Nominatim
+# returning a different city with the same name.
+MAX_GEO_DISTANCE_KM = max(200, MAX_DISTANCE_KM * 2)
 
 # UR Chintai configuration
 UR_API_BASE = "https://chintai.r6.ur-net.go.jp/chintai/api/"
@@ -51,7 +77,7 @@ def calculate_match_score(price, distance_km, train_min, floor_area):
     if price is None or price <= 0:
         return 1
 
-    # Price score: ¥20k=1.0, ¥80k=0.0 (linear)
+    # Price score: ¥20k=1.0, MAX_RENT=0.0 (linear)
     price_score = max(0, min(1, (MAX_RENT - price) / (MAX_RENT - 20000)))
 
     # Distance score: 0km=1.0, 40km=0.0 (linear)
@@ -79,7 +105,7 @@ def calculate_match_score(price, distance_km, train_min, floor_area):
     composite = max(0, min(1, composite))
 
     # Convert to 1-5 stars (rounded to nearest 0.5)
-    stars = round(composite * 4 + 1) / 2
+    stars = int(composite * 10 + 0.5) / 2
     return max(1, min(5, stars))
 
 
@@ -143,8 +169,8 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 # --- GOOGLE MAPS DIRECTIONS API ---
 TRANSIT_CACHE_FILE = "transit_cache.json"
-DESTINATION_LAT = SHINJUKU_LAT
-DESTINATION_LON = SHINJUKU_LON
+DESTINATION_LAT = TARGET_LAT
+DESTINATION_LON = TARGET_LON
 ARRIVAL_HOUR = 9
 ARRIVAL_MINUTE = 45
 
@@ -243,9 +269,22 @@ def save_json_file(path, data):
         json.dump(data, f, ensure_ascii=False)
 
 
+def is_valid_geo(lat, lon):
+    """Check a geocoded coordinate is near the target (sanity check)."""
+    if not lat or not lon:
+        return False
+    return haversine_km(TARGET_LAT, TARGET_LON, lat, lon) <= MAX_GEO_DISTANCE_KM
+
+
 def geocode_address(address, cache):
     if address in cache:
-        return cache[address]
+        cached = cache[address]
+        if cached is None:
+            return None
+        if is_valid_geo(cached["lat"], cached["lon"]):
+            return cached
+        # Cached result is invalid (e.g., a different city with the same name).
+        del cache[address]
 
     geolocator = Nominatim(user_agent="jkk-radar-bot/1.0")
     queries = [address, f"{address}, Tokyo, Japan", f"{address}, \u6771\u4eac\u90fd"]
@@ -253,7 +292,7 @@ def geocode_address(address, cache):
     for query in queries:
         try:
             location = geolocator.geocode(query, timeout=10)
-            if location:
+            if location and is_valid_geo(location.latitude, location.longitude):
                 result = {"lat": location.latitude, "lon": location.longitude}
                 cache[address] = result
                 time.sleep(1.1)
@@ -267,67 +306,58 @@ def geocode_address(address, cache):
 
 
 def send_telegram_alert(apartments):
+    """Send a single batched Telegram message with the best matches."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set. Skipping.")
         return
 
-    for apt in apartments:
-        map_url = apt.get('maps_url', '')
-        train_min = apt.get('train_min', None)
-        score = apt.get('match_score', 0)
-        stars = '\u2b50' * int(score) + ('\u00bd' if score % 1 == 0.5 else '')
-        source = apt.get('source', 'JKK')
-        detail_url = apt.get('detail_url', '')
-        text = (
-            f"\U0001f3e0 *JKK Radar Alert! [{source}]*\n"
-            f"{stars} ({score:.1f}/5 match)\n\n"
-            f"\U0001f4cd *{apt['name']}*\n"
+    if not apartments:
+        return
+
+    header = f"\U0001f3e0 *JKK Radar — {len(apartments)} best match{'es' if len(apartments) != 1 else ''}*\n\n"
+    lines = []
+    for i, apt in enumerate(apartments, start=1):
+        map_url = apt.get("maps_url", "")
+        detail_url = apt.get("detail_url", "")
+        train_min = apt.get("train_min", None)
+        score = apt.get("match_score", 0)
+        stars = "\u2b50" * int(score) + ("\u00bd" if score % 1 == 0.5 else "")
+        source = apt.get("source", "JKK")
+
+        line = (
+            f"*{i}. {apt['name']}* [{source}]\n"
+            f"{stars} ({score:.1f}/5)\n"
             f"\U0001f4b0 \u00a5{apt['price_display']}/month\n"
             f"\U0001f3e2 {apt['area']} | {apt['layout']}\n"
-            f"\U0001f4cf {apt['distance_km']:.1f} km from Shinjuku\n"
+            f"\U0001f4cf {apt['distance_km']:.1f} km from target\n"
         )
         if train_min:
-            text += f"\U0001f687 ~{train_min} min by train from Shinjuku\n"
-        text += f"\U0001f4d0 {apt['floor_area']} m\u00b2\n"
-        if map_url:
-            text += f"\U0001f517 [Google Maps]({map_url})"
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": False,
-        }
-        try:
-            resp = http_requests.post(url, json=payload, timeout=10)
-            if resp.status_code == 200:
-                print(f"Telegram alert sent: {apt['name']}")
-            else:
-                print(f"Telegram error {resp.status_code}: {resp.text}")
-        except Exception as e:
-            print(f"Telegram send failed: {e}")
+            line += f"\U0001f687 ~{train_min} min by train\n"
+        line += f"\U0001f4d0 {apt['floor_area']} m\u00b2\n"
+        if detail_url:
+            line += f"\U0001f517 [Details]({detail_url})\n"
+        elif map_url:
+            line += f"\U0001f517 [Google Maps]({map_url})\n"
+        lines.append(line)
 
-
-def send_telegram_summary(total, new_count):
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        return
-    if new_count == 0:
-        return
-
-    text = (
-        f"\U0001f50d *JKK Radar Scan Complete*\n"
-        f"Scanned {total} listings \u2022 {new_count} new affordable apartments"
-    )
+    text = header + "\n---\n".join(lines)
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
     try:
-        http_requests.post(url, json=payload, timeout=10)
-    except Exception:
-        pass
+        resp = http_requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print(f"Telegram alert sent: {len(apartments)} apartments")
+        else:
+            print(f"Telegram error {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"Telegram send failed: {e}")
 
 
 def send_telegram_removed(removed_apartments):
@@ -347,7 +377,7 @@ def send_telegram_removed(removed_apartments):
             f"\U0001f3e2 {apt.get('area', '')} | {apt.get('layout', '')}\n"
         )
         if apt.get('distance_km'):
-            text += f"\U0001f4cf {apt['distance_km']}km from Shinjuku\n"
+            text += f"\U0001f4cf {apt['distance_km']}km from target\n"
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
         try:
@@ -407,7 +437,7 @@ def send_daily_digest(active_listings, new_count, removed_count):
 
 # --- TELEGRAM BOT COMMANDS ---
 TG_OFFSET_FILE = "telegram_offset.txt"
-TG_MAX_RESULTS = 10
+TG_MAX_RESULTS = MAX_TELEGRAM_RESULTS
 
 def _fp_rank(plan):
     """Numeric rank for floor plan comparison (higher = larger)."""
@@ -454,7 +484,7 @@ def _filter_for_command(listings, cmd_type, arg):
             return []
         return [l for l in listings if _fp_rank(l.get("layout") or "") >= min_rank]
     if cmd_type == "top":
-        return sorted(listings, key=lambda a: (-(a.get("match_score", 0)), a.get("distance_km", 999), a.get("price", 0)))[:5]
+        return sorted(listings, key=lambda a: (-(a.get("match_score", 0)), a.get("distance_km", 999), a.get("price", 0)))[:MAX_TELEGRAM_RESULTS]
     return listings
 
 def _send_tg_message(token, chat_id, text):
@@ -555,7 +585,7 @@ def handle_telegram_commands(listings):
                     f"\U0001f3e2 {a.get('area', '')} | {a.get('layout', '')} | {a.get('floor_area', '?')}m\u00b2\n"
                 )
                 if a.get("distance_km"):
-                    body += f"\U0001f4cf {a['distance_km']}km from Shinjuku\n"
+                    body += f"\U0001f4cf {a['distance_km']}km from target\n"
                 if a.get("train_min"):
                     body += f"\U0001f687 ~{a['train_min']}min by train\n"
                 body += f"{stars} ({score:.1f}/5 match)\n"
@@ -662,6 +692,7 @@ def scrape_ur():
 
                 apt = {
                     "name": "\u3000".join(name_parts),
+                    "building_name": building.get("name", ""),
                     "area": building.get("skcs", ""),
                     "layout": room.get("type", ""),
                     "floor_area": str(area_sqm) if area_sqm else "?",
@@ -834,6 +865,7 @@ def parse_results(driver):
             apartments.append(
                 {
                     "name": name,
+                    "building_name": name,
                     "area": area,
                     "layout": layout,
                     "floor_area": floor_area,
@@ -937,14 +969,15 @@ def main():
             print("No GOOGLE_MAPS_API_KEY — using estimated commute times.")
 
         for i, apt in enumerate(apartments):
-            geo_query = f"{apt['name']} {apt['area']}, \u6771\u4eac\u90fd"
+            geo_name = apt.get("building_name") or apt["name"]
+            geo_query = f"{geo_name} {apt['area']}, \u6771\u4eac\u90fd"
             geo = geocode_address(geo_query, geocache)
             if not geo:
                 geo = geocode_address(f"{apt['area']}, \u6771\u4eac\u90fd", geocache)
             if geo:
                 apt["distance_km"] = haversine_km(
-                    SHINJUKU_LAT,
-                    SHINJUKU_LON,
+                    TARGET_LAT,
+                    TARGET_LON,
                     geo["lat"],
                     geo["lon"],
                 )
@@ -1006,6 +1039,15 @@ def main():
         # Sort affordable by best match score (highest first)
         affordable.sort(key=lambda a: (-a["match_score"], a["distance_km"], a["price"]))
 
+        # For Telegram alerts, apply distance and minimum match-score thresholds
+        eligible = [
+            a for a in affordable
+            if a["distance_km"] != float("inf")
+            and a["distance_km"] <= MAX_DISTANCE_KM
+            and a["match_score"] >= MIN_MATCH_SCORE
+        ]
+        print(f"After distance + match score filters: {len(eligible)} apartments")
+
         # Save ALL results for web dashboard (sorted by match score)
         all_sorted = sorted(apartments, key=lambda a: (-a["match_score"], a["distance_km"], a["price"]))
         import datetime
@@ -1041,9 +1083,16 @@ def main():
         save_json_file("results.json", results)
         print("Saved results.json for dashboard.")
 
-        # Filter out already-seen apartments (only notify NEW ones)
-        new_apartments = [a for a in affordable if a["uid"] not in seen_apartments]
-        print(f"New affordable apartments: {len(new_apartments)}")
+        # Filter out already-seen apartments (only notify NEW ones), and
+        # deduplicate by UID within this run so the same listing doesn't
+        # appear twice in the alert batch.
+        seen_new = set()
+        new_apartments = []
+        for a in eligible:
+            if a["uid"] not in seen_apartments and a["uid"] not in seen_new:
+                seen_new.add(a["uid"])
+                new_apartments.append(a)
+        print(f"New eligible apartments: {len(new_apartments)}")
 
         # Detect removed listings (previously seen, no longer in current results)
         current_uids = {a["uid"] for a in apartments}
@@ -1056,7 +1105,8 @@ def main():
             seen_apartments = [uid for uid in seen_apartments if uid in current_uids]
 
         if new_apartments:
-            # Deduplicate by building name — keep the cheapest unit per building
+            # Deduplicate by building name to avoid spamming multiple units
+            # in the same building. Match score is already sorted descending.
             seen_buildings = set()
             unique_buildings = []
             for a in new_apartments:
@@ -1064,16 +1114,12 @@ def main():
                     seen_buildings.add(a["name"])
                     unique_buildings.append(a)
 
-            # Sort by best match score (highest first)
-            unique_buildings.sort(key=lambda a: (-a["match_score"], a["distance_km"], a["price"]))
+            # Only alert top MAX_TELEGRAM_RESULTS best matches
+            top_matches = unique_buildings[:MAX_TELEGRAM_RESULTS]
+            send_telegram_alert(top_matches)
 
-            # Only alert top 5
-            top5 = unique_buildings[:5]
-            send_telegram_alert(top5)
-            send_telegram_summary(len(apartments), len(new_apartments))
-
-            # Alert on removed listings
-            if removed_uids:
+            # Alert on removed listings only if enabled
+            if ALERT_REMOVED and removed_uids:
                 send_telegram_removed([{"name": uid, "price_display": "?", "area": "", "layout": ""} for uid in removed_uids[:5]])
 
             # Save notification history
@@ -1095,7 +1141,7 @@ def main():
                         "train_min": a.get("train_min"),
                         "maps_url": a.get("maps_url", ""),
                     }
-                    for a in top5
+                    for a in top_matches
                 ],
             })
             # Keep last 50 notifications
@@ -1106,10 +1152,10 @@ def main():
             seen_apartments.extend(a["uid"] for a in new_apartments)
             seen_apartments = list(set(seen_apartments))
             save_json_file(SEEN_FILE, seen_apartments)
-            print(f"Alerted on {len(top5)} unique buildings (from {len(new_apartments)} new units).")
+            print(f"Alerted on {len(top_matches)} unique buildings (from {len(new_apartments)} new units).")
         else:
-            print("No new affordable apartments since last scan.")
-            if removed_uids:
+            print("No new eligible apartments since last scan.")
+            if ALERT_REMOVED and removed_uids:
                 send_telegram_removed([{"name": uid, "price_display": "?", "area": "", "layout": ""} for uid in removed_uids[:5]])
                 save_json_file(SEEN_FILE, seen_apartments)
 
@@ -1129,7 +1175,7 @@ def main():
             except Exception:
                 pass
 
-        if send_digest:
+        if SEND_DAILY_DIGEST and send_digest:
             send_daily_digest(apartments, len(new_apartments), len(removed_uids))
             import datetime
             from datetime import timezone, timedelta
